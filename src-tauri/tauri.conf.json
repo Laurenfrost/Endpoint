@@ -4,15 +4,18 @@
   "version": "0.1.0",
   "identifier": "dev.endpoint.app",
   "build": {
-    "frontendDist": "../ui"
+    "beforeDevCommand": "npm --prefix ui run dev",
+    "beforeBuildCommand": "npm --prefix ui run build",
+    "devUrl": "http://127.0.0.1:5173",
+    "frontendDist": "../ui/dist"
   },
   "app": {
     "windows": [
       {
         "label": "main",
         "title": "Endpoint — 网文 txt → EPUB",
-        "width": 720,
-        "height": 640,
+        "width": 1280,
+        "height": 800,
         "resizable": true
       }
     ],

@@ -36,6 +36,8 @@ pub fn analyze(text: &str) -> Vec<CleaningAnnotation> {
 
     // —— 第一遍:逐行分析。 ——
     // 行的定义:由 `\n` 分隔的字节区间(不含 `\n`)。
+    // TODO(cancel): 接 `ConvertOptions.cancel_token` 后,每 N 行检查一次取消标志,
+    // 提前返回。阶段二只预留接口,不实装。
     let mut line_start = 0usize;
     for (i, b) in text.bytes().enumerate() {
         if b == b'\n' {

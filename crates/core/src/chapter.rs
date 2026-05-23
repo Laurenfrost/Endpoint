@@ -59,6 +59,8 @@ pub fn parse(
     let volume_rules = compile_rules(rules, RuleKind::Volume)?;
 
     // 第一阶段:候选行扫描。
+    // TODO(cancel): 接 `ConvertOptions.cancel_token` 后,每 N 行检查一次取消标志,
+    // 提前返回 `ChapterError::Cancelled`(待添加)。阶段二只预留接口,不实装。
     let mut candidates: Vec<HeadingCandidate> = Vec::new();
     for (line_start, line_end) in iter_lines(source) {
         let line = &source[line_start..line_end];

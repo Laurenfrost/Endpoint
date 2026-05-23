@@ -223,12 +223,31 @@ LLM 客户端定义为可替换的接口（Rust trait）。核心库依赖「能
 5. 每个 Chapter/Volume 必带 `origin` + `matched_rule_id`。
 6. 阶段二之后修改契约需特别谨慎；新增字段优于改动已有字段。
 
-### 阶段二：VS Code 式界面骨架
-三栏布局 + 虚拟滚动文本区 + 概览标尺 + 桥接层异步任务与进度回传。排在核心库之后：界面是核心库输出的消费者，先有稳定数据契约，界面才不返工。
-**入口**：`endpoint_core::run_pipeline()` 已就绪,返回 `PipelineOutput { source_text, source_encoding, cleaning, book }`,这就是阶段二三处 UI 消费(正文高亮/侧边栏/概览标尺)的数据源。
+### 阶段二：VS Code 式界面骨架 — ✅ 已完成
+
+**目标（原定）**：三栏布局 + 虚拟滚动文本区 + 概览标尺 + 桥接层异步任务与进度回传。排在核心库之后：界面是核心库输出的消费者，先有稳定数据契约，界面才不返工。
+
+**子阶段切分与冻结契约见** `docs/stage2-design.md`（阶段二跨多 session 接力开发，本文档是契约 + 子阶段表 + 真机 checklist 的唯一真相源）。
+
+**实际交付**：
+- **契约扩展（2.0）**：给 `domain.rs` 中 `Book` / `BookEntry` / `Volume` / `Chapter` / `Paragraph` / `Metadata` / `ChapterOrigin` 加 serde derive；`BookEntry` 用 `tag = "type"` 内嵌；`Chapter.paragraphs` 与 `Metadata.cover` 用 `#[serde(skip)]` 不进 IPC；新增 `pipeline_output_json_shape_is_frozen` 测试锁定字段名（任何偏离会被该测试拦下）。
+- **桥接层重写（2.1）**：`src-tauri/src/state.rs` 新增 `AppState`（缓存最近一次 `PipelineOutput` + task_id 计数器 + cancel 注册表）；`commands.rs` 新增 `load_and_analyze` / `build_epub` / `cancel_task`，旧 `convert` 保留作回归保险；核心库 `lib.rs` 加 `ProgressSink` trait + `NoopSink` + `ConvertOptions.cancel_token`，`run_pipeline` / `build_epub_from` 签名追加 `progress: &dyn ProgressSink`；`cleaning.rs` / `chapter.rs` 主扫描循环加 `TODO(cancel)` 注释（取消接口预留但 v1 不实装）。
+- **前端工程链（2.2）**：`ui/` 转为 Vite 6 + Svelte 5 项目；`tauri.conf.json` 接 `beforeDevCommand` / `beforeBuildCommand` / `devUrl` / `frontendDist: "../ui/dist"`；窗口尺寸调到 1280×800。
+- **VS Code 式三栏（2.3-2.5）**：`App.svelte` = 标题栏（含全局进度条）+ ActivityBar（56px，四阶段图标）+ Sidebar（320px，按 stage 切组件）+ TextView；`stores/` 4 个 svelte runes store（pipeline / stage / progress / annotations）；`text/ByteIndex.js` 处理 ASCII / BMP CJK / 代理对全谱 + 6 个 assert 测试；`text/VirtualText.svelte` 行级虚拟滚动（按 `\n` 分行 + 动态 wrapCol 估算行高 + cumHeights 二分定位 + 多层 ann 叠加渲染）；`text/OverviewRuler.svelte` Canvas DPR 自适应右缘标尺。
+- **四阶段 UI**：Stage1 文件 + 编码探测 / 手动覆盖 → 自动跳阶段 2；Stage2 红色清洗高亮 + 侧边栏列表 + kind chips + 上下文预览 + 懒加载 200/批，灰区/可疑列表保留空占位（阶段三填）；Stage3 卷-章双级树（折叠/展开）+ stats chips + origin badge + 三层 ann 叠加（红清洗 + 蓝章 + 绿卷）；Stage4 元数据表单 + kepubify 可选，正式调 `build_epub`。
+- **进度回传**：`endpoint://progress` 事件 `{ task_id, stage, percent, detail? }`，stage ∈ `decoding`/`cleaning`/`chapter`/`epub`/`kepubify`；App.svelte 全局订阅。
+- **共享富标注架构**：`annotations` store 同时驱动 VirtualText / Sidebar / Stage 列表 / OverviewRuler——契约第 6 条「同一份富标注，三处消费」的兑现点。
+- **测试**：54 个核心库单测 + 6 个 ByteIndex 测试全绿；`cargo check --workspace` 干净；`npm run build` 产物 62KB JS / 10KB CSS（gzip 24KB / 2.4KB）。
+
+**真机验证**：已通过（`docs/stage2-design.md` 第六节 checklist 全项过，含 200 万字 GBK 网文加载/滚动/卷-章跳转/三层标尺色块/EPUB+kepub 出书）。
+
+**已知限制**：
+- VirtualText 行高靠估算，长段落实际渲染可能略超估算槽位（CJK 网文中肉眼难察；若后续发现明显问题再加 ResizeObserver 二次校正）。
+- Cancel 接口预留但未实装（核心库长循环只挂 TODO 注释）。
 
 ### 阶段三：本地水印智能
 填入本地 NLP 水印检测：行频统计、非中文占比、关键词正则的多特征打分漏斗（困惑度等高级特征可后放）。产出红黄高亮 + 侧边栏可疑列表。纯本地、可解释、零成本。
+**入口**：阶段二 `Stage2Cleaning.svelte` 已留好「灰区/可疑(占位)」位置，黄色 ann layer 直接挂上即可显示；核心库新增 `watermark` 模块产出 `WatermarkAnnotation`，作为 `PipelineOutput` 的**新增字段**（CLAUDE.md 第十二节工作约定：新增字段 OK，改动已有字段需先呈请用户）。
 
 ### 阶段四：LLM 兜底与导出精修
 最后上最不确定的部分：LLM 灰区仲裁（水印灰区、超长区间漏标题、元数据抓取）、导出精修（字体嵌入、CSS 自定义、元数据编辑、kepubify 选项）。LLM 排最后因为它是可选增强——前四阶段没它也能完整工作。

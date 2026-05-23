@@ -26,11 +26,32 @@ pub mod kepubify;
 pub mod rules;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use thiserror::Error;
 
 pub use crate::domain::{Metadata, PipelineOutput};
 pub use crate::rules::RuleSet;
+
+/// 进度回传通道。核心库依赖此 trait,桥接层(Tauri)实现把回调转 `app.emit`。
+///
+/// 设计成 trait 而非具体类型是为了:
+/// 1. 让核心库脱离 Tauri 单独编译/测试([`NoopSink`] 用于无进度场景与单测)。
+/// 2. 将来若改用其他 UI(CLI、WebSocket)只换实现即可。
+///
+/// `stage` 枚举锁定为:`"decoding"` / `"cleaning"` / `"chapter"` / `"epub"` / `"kepubify"`。
+/// 详见 `docs/stage2-design.md` 第三节进度事件冻结。
+pub trait ProgressSink: Send + Sync {
+    fn report(&self, stage: &str, percent: u8, detail: Option<&str>);
+}
+
+/// 不发任何进度的实现。用于阶段零的一站式 [`convert`] 与单元测试。
+pub struct NoopSink;
+
+impl ProgressSink for NoopSink {
+    fn report(&self, _: &str, _: u8, _: Option<&str>) {}
+}
 
 #[derive(Debug, Error)]
 pub enum CoreError {
@@ -55,20 +76,33 @@ pub struct ConvertOptions {
     pub rules_path: Option<PathBuf>,
     /// kepubify 可执行路径。`None` 表示只输出 .epub,不做 kepub 优化。
     pub kepubify_path: Option<PathBuf>,
+    /// 取消标志。v1 仅接口预留——核心库长循环里只标注 `TODO(cancel)`,**不**实际检查。
+    /// 阶段二之后再实装:在 `cleaning::analyze` / `chapter::parse` 的主扫描循环里
+    /// 每 N 行检查一次,若被置位则提前返回特定错误。
+    pub cancel_token: Option<Arc<AtomicBool>>,
 }
 
 /// 阶段二界面会消费的入口:从字节运行完整文本管线,产出富标注。
 ///
 /// 不读文件、不写文件——内存语义。便于核心库脱离 IO 单元测试。
+///
+/// `progress` 用于向上层回报阶段进度;不需要进度时传 `&NoopSink`。
 pub fn run_pipeline(
     bytes: &[u8],
     metadata: Metadata,
     options: &ConvertOptions,
+    progress: &dyn ProgressSink,
 ) -> Result<PipelineOutput, CoreError> {
+    progress.report("decoding", 0, None);
     let (source_text, source_encoding) =
         encoding::decode(bytes, options.encoding_override.as_deref())?;
-    let cleaning_anns = cleaning::analyze(&source_text);
+    progress.report("decoding", 100, Some(&source_encoding));
 
+    progress.report("cleaning", 0, None);
+    let cleaning_anns = cleaning::analyze(&source_text);
+    progress.report("cleaning", 100, None);
+
+    progress.report("chapter", 0, None);
     let rules = match &options.rules_path {
         Some(p) => {
             let mut set = RuleSet::builtin();
@@ -79,6 +113,7 @@ pub fn run_pipeline(
     };
 
     let book = chapter::parse(&source_text, &cleaning_anns, &rules, metadata)?;
+    progress.report("chapter", 100, None);
 
     Ok(PipelineOutput {
         source_text,
@@ -91,19 +126,25 @@ pub fn run_pipeline(
 /// 把已经跑过管线的 [`PipelineOutput`] 写成 EPUB,可选 kepubify。
 ///
 /// 返回最终产物路径(若启用 kepubify,返回 .kepub.epub;否则返回 .epub)。
+/// `progress` 不需要时传 `&NoopSink`。
 pub fn build_epub_from(
     pipeline: &PipelineOutput,
     output_epub: &Path,
     kepubify_path: Option<&Path>,
+    progress: &dyn ProgressSink,
 ) -> Result<PathBuf, CoreError> {
+    progress.report("epub", 0, None);
     epub::build(&pipeline.book, output_epub)?;
+    progress.report("epub", 100, None);
 
     if let Some(kepubify) = kepubify_path {
+        progress.report("kepubify", 0, None);
         let out_dir = output_epub
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         let kepub = kepubify::run(kepubify, output_epub, &out_dir)?;
+        progress.report("kepubify", 100, None);
         return Ok(kepub);
     }
     Ok(output_epub.to_path_buf())
@@ -111,8 +152,8 @@ pub fn build_epub_from(
 
 /// 顶层一站式入口:读文件 → 跑管线 → 写 EPUB → 可选 kepubify。
 ///
-/// 桥接层目前使用此入口。阶段二界面将改用 [`run_pipeline`] + [`build_epub_from`] 以
-/// 取得富标注后再分两步出 EPUB。
+/// 桥接层的旧 `convert` 命令使用此入口(回归保险)。阶段二界面改用
+/// [`run_pipeline`] + [`build_epub_from`] 拆两步走以取得富标注。
 pub fn convert(
     input_txt: &Path,
     output_epub: &Path,
@@ -125,6 +166,11 @@ pub fn convert(
             source: e,
         })
     })?;
-    let pipeline = run_pipeline(&bytes, metadata, options)?;
-    build_epub_from(&pipeline, output_epub, options.kepubify_path.as_deref())
+    let pipeline = run_pipeline(&bytes, metadata, options, &NoopSink)?;
+    build_epub_from(
+        &pipeline,
+        output_epub,
+        options.kepubify_path.as_deref(),
+        &NoopSink,
+    )
 }

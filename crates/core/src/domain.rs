@@ -102,7 +102,11 @@ pub struct CleaningAnnotation {
 }
 
 /// 清洗类型。阶段一限定为确定性、低风险的格式整理;水印类检测属阶段三,**不**写在这里。
+///
+/// `#[serde(rename_all = "snake_case")]` 让前端拿到 `"fullwidth_space"` 等。
+/// 详见 `docs/stage2-design.md` 第三节枚举锁定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CleaningKind {
     /// 多余空行压缩(连续 2 个及以上空行 → 保留 1 个)
     BlankLineCompression,
@@ -115,20 +119,24 @@ pub enum CleaningKind {
 }
 
 /// 一本完整的书。所有内嵌 chapter/volume 的 span 都指向 [`PipelineOutput::source_text`]。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Book {
     pub metadata: Metadata,
     /// 顶层条目有序列表:卷或章。无卷小说就是一串 `Chapter`,有卷小说混入 `Volume`。
     pub entries: Vec<BookEntry>,
 }
 
-#[derive(Debug, Clone)]
+/// `#[serde(tag = "type", rename_all = "snake_case")]` 让前端拿到的 JSON 形如
+/// `{ "type": "volume", ... }` / `{ "type": "chapter", ... }`,详见
+/// `docs/stage2-design.md` 第三节 JSON shape 冻结。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum BookEntry {
     Volume(Volume),
     Chapter(Chapter),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Volume {
     pub title: String,
     pub chapters: Vec<Chapter>,
@@ -139,9 +147,13 @@ pub struct Volume {
     pub matched_rule_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chapter {
     pub title: String,
+    /// **不进 IPC**:与 `body_span` + `cleaning` 完全冗余,前端可按需 derive。
+    /// 详见 `docs/stage2-design.md` 第三节"两个 skip_serializing 字段"。
+    /// Rust 端仍保留以供 EPUB 构建模块使用。
+    #[serde(skip)]
     pub paragraphs: Vec<Paragraph>,
     /// 章标题行(不含正文)在 decoded source 中的位置。
     /// 阶段三水印检测、阶段二 UI 章节高亮均以此为锚点。
@@ -155,7 +167,12 @@ pub struct Chapter {
 }
 
 /// 段落:纯文本,**不包含任何 XHTML**。段落 → XHTML 的转换在 EPUB 构建阶段进行。
-#[derive(Debug, Clone)]
+///
+/// `#[serde(transparent)]` 让 `Paragraph("hi")` 直接序列化为字符串 `"hi"`,而非
+/// `["hi"]`——尽管目前 `Chapter.paragraphs` 已被 `#[serde(skip)]`,这里仍保留
+/// 透明序列化以保安全。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Paragraph(pub String);
 
 impl Paragraph {
@@ -169,7 +186,11 @@ impl Paragraph {
 }
 
 /// 「这一章/卷是怎么来的」的出处标记。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `#[serde(rename_all = "snake_case")]` 让前端拿到 `"regex_match"` / `"fallback"` 等。
+/// 详见 `docs/stage2-design.md` 第三节枚举锁定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ChapterOrigin {
     /// 由规则库的某条规则匹配得到(`matched_rule_id` 应同时填写)。
     RegexMatch,
@@ -181,11 +202,13 @@ pub enum ChapterOrigin {
     Fallback,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metadata {
     pub title: String,
     pub author: String,
     pub language: String,
+    /// **不进 IPC**:二进制图片不走 JSON。阶段四再做封面 UI。Rust 端 EPUB 构建仍会用。
+    #[serde(skip)]
     pub cover: Option<Vec<u8>>,
     pub description: Option<String>,
 }
@@ -205,7 +228,9 @@ impl Metadata {
 
 /// 核心库管线的完整输出。三处 UI 消费(正文高亮 / 侧边栏 / 概览标尺)与 EPUB 构建
 /// 全部从这里取数据。
-#[derive(Debug, Clone)]
+///
+/// 序列化产物即阶段二的 `PipelineDto`,字段顺序与名称参见 `docs/stage2-design.md`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineOutput {
     /// 解码后的源文本——所有 span 的坐标参照系。
     pub source_text: String,
@@ -272,5 +297,102 @@ mod tests {
         let j = serde_json::to_string(&a).unwrap();
         let back: CleaningAnnotation = serde_json::from_str(&j).unwrap();
         assert_eq!(a, back);
+    }
+
+    /// **契约锁定测试**:验证 `PipelineOutput` 序列化后的 JSON 字段名与
+    /// `docs/stage2-design.md` 第三节冻结的 shape 完全一致。
+    ///
+    /// 一旦该测试失败,意味着 IPC 契约被改动——必须同步更新设计文档与前端代码,
+    /// **不要**简单调整测试期望值"让它过"。
+    #[test]
+    fn pipeline_output_json_shape_is_frozen() {
+        let pipeline = PipelineOutput {
+            source_text: "第一卷 风云起\n第一章 起\n正文内容".into(),
+            source_encoding: "UTF-8".into(),
+            cleaning: vec![CleaningAnnotation {
+                span: Span::new(0, 3),
+                kind: CleaningKind::FullwidthSpace,
+                replacement: Some(" ".into()),
+            }],
+            book: Book {
+                metadata: Metadata {
+                    title: "测试书".into(),
+                    author: "测试作者".into(),
+                    language: "zh-CN".into(),
+                    cover: Some(vec![0xFFu8, 0xD8, 0xFF]),
+                    description: None,
+                },
+                entries: vec![
+                    BookEntry::Volume(Volume {
+                        title: "第一卷 风云起".into(),
+                        chapters: vec![Chapter {
+                            title: "第一章 起".into(),
+                            paragraphs: vec![Paragraph::new("正文")],
+                            heading_span: Span::new(20, 30),
+                            body_span: Span::new(30, 50),
+                            origin: ChapterOrigin::RegexMatch,
+                            matched_rule_id: Some("builtin:chapter:cn-digit".into()),
+                        }],
+                        heading_span: Span::new(0, 18),
+                        origin: ChapterOrigin::RegexMatch,
+                        matched_rule_id: Some("builtin:volume:cn-digit".into()),
+                    }),
+                    BookEntry::Chapter(Chapter {
+                        title: "番外".into(),
+                        paragraphs: vec![],
+                        heading_span: Span::new(60, 66),
+                        body_span: Span::new(66, 100),
+                        origin: ChapterOrigin::Fallback,
+                        matched_rule_id: None,
+                    }),
+                ],
+            },
+        };
+
+        let v: serde_json::Value = serde_json::to_value(&pipeline).unwrap();
+
+        // 顶层字段
+        assert!(v.get("source_text").is_some(), "缺 source_text");
+        assert!(v.get("source_encoding").is_some(), "缺 source_encoding");
+        assert!(v.get("cleaning").is_some(), "缺 cleaning");
+        assert!(v.get("book").is_some(), "缺 book");
+
+        // cleaning 字段
+        let c0 = &v["cleaning"][0];
+        assert_eq!(c0["span"]["start"], 0);
+        assert_eq!(c0["span"]["end"], 3);
+        assert_eq!(c0["kind"], "fullwidth_space", "枚举变体应为 snake_case");
+        assert_eq!(c0["replacement"], " ");
+
+        // metadata.cover 必须 **不在** 输出里(skip_serializing)
+        assert!(
+            v["book"]["metadata"].get("cover").is_none(),
+            "Metadata.cover 应当 #[serde(skip)],不进 IPC"
+        );
+        assert_eq!(v["book"]["metadata"]["title"], "测试书");
+        assert_eq!(v["book"]["metadata"]["language"], "zh-CN");
+
+        // entries[0] = volume
+        let vol = &v["book"]["entries"][0];
+        assert_eq!(vol["type"], "volume", "BookEntry tag 必须是 type");
+        assert!(vol.get("title").is_some());
+        assert!(vol.get("heading_span").is_some());
+        assert_eq!(vol["origin"], "regex_match");
+        assert_eq!(vol["matched_rule_id"], "builtin:volume:cn-digit");
+        let ch = &vol["chapters"][0];
+        // chapter 内部:paragraphs 必须 **不在** 输出里
+        assert!(
+            ch.get("paragraphs").is_none(),
+            "Chapter.paragraphs 应当 #[serde(skip)],不进 IPC"
+        );
+        assert!(ch.get("heading_span").is_some());
+        assert!(ch.get("body_span").is_some());
+        assert_eq!(ch["origin"], "regex_match");
+
+        // entries[1] = chapter,顶层直挂(无卷)
+        let ext = &v["book"]["entries"][1];
+        assert_eq!(ext["type"], "chapter");
+        assert_eq!(ext["origin"], "fallback");
+        assert_eq!(ext["matched_rule_id"], serde_json::Value::Null);
     }
 }
