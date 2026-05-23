@@ -1,0 +1,18 @@
+[package]
+name = "endpoint-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure Rust core library for Endpoint: txt → epub conversion pipeline."
+
+[lib]
+name = "endpoint_core"
+path = "src/lib.rs"
+
+[dependencies]
+regex = { workspace = true }
+zip = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
