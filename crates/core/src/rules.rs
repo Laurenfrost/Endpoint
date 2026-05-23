@@ -280,6 +280,68 @@ fn builtin_rules() -> Vec<Rule> {
             200,
             "「第X部」格式",
         ),
+        // —— 阶段三:水印规则 ——
+        //
+        // 这些规则匹配「整行任意位置」(不锚定 ^...$),用于 watermark 检测的关键词特征。
+        // 命中即给该行加一条 `WatermarkSignal { kind: keyword_regex, score: 1.0 }`;
+        // 单 keyword 命中默认权重融合 = 0.40,落 suspect 灰区(不会自动删除)。
+        //
+        // 收录原则:可解释 + 不易误命中正文 + 网文常见。模糊或激进的模式留待 LLM 规则生成器
+        // (阶段四)产出,不作为内置。
+        Rule::builtin(
+            "builtin-watermark-url-http",
+            r"https?://[A-Za-z0-9_./\-?#=&%+:~]+",
+            RuleKind::Watermark,
+            200,
+            "HTTP/HTTPS URL",
+        ),
+        Rule::builtin(
+            "builtin-watermark-url-www",
+            r"(?:^|[\s\u{3000}(\[【「『])www\.[A-Za-z0-9_./\-]{3,}",
+            RuleKind::Watermark,
+            190,
+            "www. 开头的网址简写",
+        ),
+        Rule::builtin(
+            "builtin-watermark-tg-handle",
+            // 至少 5 个字符,大幅降低普通正文(如 emoji 间隔的 @人名)误命中
+            r"@[A-Za-z0-9_]{5,}",
+            RuleKind::Watermark,
+            150,
+            "@开头的 Telegram / 社交账号",
+        ),
+        Rule::builtin(
+            "builtin-watermark-domain",
+            // 常见网文站常用 TLD;\b 避免在中文里乱触发
+            r"\b[A-Za-z][A-Za-z0-9\-]{1,}\.(?:com|net|org|cc|cn|io|me|xyz|info|tv|club|app|top|vip|biz)\b",
+            RuleKind::Watermark,
+            180,
+            "常见 TLD 域名(.com/.cc/.cn 等)",
+        ),
+        Rule::builtin(
+            "builtin-watermark-first-publish",
+            // 「本书/本文/本章 首发」、「首发于」、「更新最快」
+            r"(?:本(?:文|书|章|站)\s*首发|首发(?:于|地址|平台|网址|站点)|更新最快|最快(?:更新|阅读))",
+            RuleKind::Watermark,
+            170,
+            "「首发于」「更新最快」等推广水印",
+        ),
+        Rule::builtin(
+            "builtin-watermark-piracy-warn",
+            // 「盗版必究 / 抄袭可耻 / 严禁转载 / 搬运可耻」之类的版权声明
+            r"(?:盗版必究|盗文可耻|抄袭可耻|搬运可耻|严禁转载|未经授权请勿转载)",
+            RuleKind::Watermark,
+            160,
+            "版权声明 / 反盗版水印",
+        ),
+        Rule::builtin(
+            "builtin-watermark-free-read",
+            // 「免费阅读 / 无广告阅读 / 全文阅读」之类的推广行
+            r"(?:免费(?:阅读|看书|小说)|无广告(?:阅读|追书)|全本(?:免费|无弹窗))",
+            RuleKind::Watermark,
+            140,
+            "「免费阅读」「无广告」等推广水印",
+        ),
     ]
 }
 
@@ -422,6 +484,79 @@ mod tests {
         // 抽查首条规则
         assert_eq!(loaded.rules[0].id, set.rules[0].id);
         assert_eq!(loaded.rules[0].pattern, set.rules[0].pattern);
+    }
+
+    fn matches_any_substring(rules: &[&Rule], line: &str) -> Option<String> {
+        for r in rules {
+            let re = r.compile().unwrap();
+            if re.is_match(line) {
+                return Some(r.id.clone());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn watermark_rules_all_compile() {
+        let set = RuleSet::builtin();
+        let wms: Vec<&Rule> = set
+            .rules
+            .iter()
+            .filter(|r| r.kind == RuleKind::Watermark)
+            .collect();
+        assert!(wms.len() >= 5, "阶段三应当至少有 5 条内置 watermark 规则");
+        for r in &wms {
+            r.compile().unwrap_or_else(|e| panic!("watermark 规则 {} 编译失败: {e}", r.id));
+        }
+    }
+
+    #[test]
+    fn watermark_rules_match_typical_lines() {
+        let set = RuleSet::builtin();
+        let rules = set.enabled_by_kind(RuleKind::Watermark);
+        // 每个 case 是一行典型的水印文本,应当至少有一条规则命中
+        let positives = [
+            "更多精彩内容请访问 https://novel.example.com/book/12345",
+            "请到 www.somesite.cc 阅读最新章节",
+            "关注 TG 频道 @somenovelchannel",
+            "首发于 xyznovel.com,转载请注明",
+            "本文首发于纵横中文网",
+            "更新最快的小说网站",
+            "盗版必究!",
+            "未经授权请勿转载",
+            "免费阅读全本小说",
+            "无广告追书,体验更佳",
+        ];
+        for line in positives {
+            assert!(
+                matches_any_substring(&rules, line).is_some(),
+                "未识别水印行: {}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn watermark_rules_reject_normal_prose() {
+        let set = RuleSet::builtin();
+        let rules = set.enabled_by_kind(RuleKind::Watermark);
+        // 这些是典型正文,**不**应被任何 watermark 规则命中
+        let negatives = [
+            "他抬起头,望着远方的天空。",
+            "「你怎么了?」她轻声问道。",
+            "夜色渐浓,街上的人也少了。",
+            "第一章 起",  // 章节标题不应被 watermark 规则命中
+            "第二卷 风云起",
+            "嗯。",
+            "「……」",
+        ];
+        for line in negatives {
+            assert!(
+                matches_any_substring(&rules, line).is_none(),
+                "误识别为水印: {}",
+                line
+            );
+        }
     }
 
     #[test]
