@@ -60,7 +60,7 @@ $("generate").addEventListener("click", async () => {
   if (!title) return setStatus("请填写书名。", "err");
   if (!author) return setStatus("请填写作者。", "err");
 
-  setStatus("正在生成...(大文件请耐心等待,阶段零无进度条)", "");
+  setStatus("正在生成...(大文件请耐心等待,进度条留到阶段二)", "");
   $("generate").disabled = true;
 
   try {

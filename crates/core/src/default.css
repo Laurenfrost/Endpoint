@@ -25,3 +25,12 @@ p {
   text-indent: 2em;
   margin: 0.4em 0;
 }
+
+/* 卷分隔页:大号居中标题占据整页。 */
+h1.volume-title {
+  font-size: 2.2em;
+  margin: 40% 0 0 0;
+  text-align: center;
+  page-break-before: always;
+  page-break-after: always;
+}

@@ -75,10 +75,10 @@
 </head>
 <body>
   <h1>txt → EPUB</h1>
-  <div class="subtitle">阶段零(Walking Skeleton):端到端打通,质量不论</div>
+  <div class="subtitle">阶段一:核心库文本处理已扎实,界面仍为简易壳</div>
 
   <div class="row">
-    <label>输入 txt 文件(UTF-8)</label>
+    <label>输入 txt 文件(编码自动探测:UTF-8 / GBK / GB18030 / UTF-16)</label>
     <div class="input-group">
       <input type="text" id="input" placeholder="点右侧按钮选择..." readonly />
       <button id="pickInput">选择文件</button>
@@ -115,7 +115,10 @@
 
   <div class="status" id="status">等待操作。</div>
 
-  <div class="stage-hint">阶段零仅识别「第X章」这一条章节模式。其他智能(编码探测、水印、卷识别)留待后续阶段。</div>
+  <div class="stage-hint">
+    阶段一已具备:多编码自动探测、文本清洗(空行/空白/控制字符)、规则库化的章节识别(第X章/回/话/节、楔子/序章/番外)、卷识别(第X卷/部、卷X、上中下卷)、两级 TOC。
+    阶段二将上 VS Code 式三栏界面与进度条;阶段三接水印智能。
+  </div>
 
   <script src="main.js"></script>
 </body>

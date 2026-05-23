@@ -199,12 +199,33 @@ LLM 客户端定义为可替换的接口（Rust trait）。核心库依赖「能
 
 **真机验证**：已通过（kepub 在 Kobo 上可正常阅读）。
 
-### 阶段一：核心库文本处理做扎实
-加固确定性、低风险部分：编码探测（自动 + 手动覆盖）、文本清洗、章节解析前两阶段（正则规则库 + 卷章层级）。规则库 JSON 管理在此落地。**此时不碰 LLM、不碰水印打分。**
-**进入阶段二前，冻结核心库的富标注输出契约。**
+### 阶段一：核心库文本处理做扎实 — ✅ 已完成
+
+**目标（原定）**：加固确定性、低风险部分：编码探测、文本清洗、章节解析前两阶段（规则库 + 卷章层级）。**冻结富标注输出契约。**
+
+**实际交付**：
+- 核心库新增 3 模块：`encoding`（BOM sniff + chardetng 探测 + encoding_rs 解码 + 手动覆盖，GBK 探测统一升 GB18030）/ `cleaning`（产出 `CleaningAnnotation` 列表 + 按需 `apply()`，覆盖空行压缩/行尾空白/行首全角空格/控制字符）/ `rules`（`Rule`/`RuleSet`、9 条内置默认规则、JSON load/save、按优先级降序）。
+- `domain` 重写并**冻结富标注契约**：`Span`（UTF-8 字节、半开区间）/ `CleaningAnnotation` / `Chapter` + `Volume` 改用 `heading_span`+`body_span`+`matched_rule_id` / `PipelineOutput`。模块顶部长 doc comment 即正式契约说明。
+- `chapter` 改为两阶段流水线：多规则候选扫描 + 卷章层级组织。卷前章挂书根；卷头到首章之间若有实质内容，作为「(卷前)」Fallback 章保留入卷以免文本丢失。
+- `lib.rs` 重新分层：`run_pipeline()`（给阶段二界面用）+ `build_epub_from()` + `convert()`（一站式兼容入口）；新增 `ConvertOptions`（编码覆盖 / 规则文件 / kepubify 路径）。
+- `epub.rs` 跟着升级支持卷：每卷生成独立的 `volume_NNNN.xhtml` 分隔页（`h1.volume-title`），nav.xhtml/toc.ncx 改为两级嵌套，`dtb:depth` 动态算到 2。**修复了阶段零留下的 `flatten_chapters` bug——原实现会丢掉卷标题文本与 `Volume.title`**。
+- `reader.rs` 删除，功能并入 `encoding.rs`。
+- 桥接层最小化改动：`commands.rs` 内部使用 `ConvertOptions::default()`，Tauri 命令签名与前端代码不动。
+- 53 个核心库单测全部通过。
+
+**真机验证**：已通过（带卷的小说在 Kobo 上目录正确显示两级层级）。
+
+**契约冻结要点**（详见 `crates/core/src/domain.rs` 顶部 doc comment）：
+1. 偏移单位 = **UTF-8 字节**，不是 char 计数。
+2. 端点语义 = **半开区间 `[start, end)`**，必须落在字符边界。
+3. 坐标参照系 = **decoded source**（编码探测后、清洗前的字符串）。
+4. 清洗以**标注列表**存在，不预先 materialize 清洗后文本——`PipelineOutput.cleaning` 与正文 paragraph 是两条并行的视图。
+5. 每个 Chapter/Volume 必带 `origin` + `matched_rule_id`。
+6. 阶段二之后修改契约需特别谨慎；新增字段优于改动已有字段。
 
 ### 阶段二：VS Code 式界面骨架
 三栏布局 + 虚拟滚动文本区 + 概览标尺 + 桥接层异步任务与进度回传。排在核心库之后：界面是核心库输出的消费者，先有稳定数据契约，界面才不返工。
+**入口**：`endpoint_core::run_pipeline()` 已就绪,返回 `PipelineOutput { source_text, source_encoding, cleaning, book }`,这就是阶段二三处 UI 消费(正文高亮/侧边栏/概览标尺)的数据源。
 
 ### 阶段三：本地水印智能
 填入本地 NLP 水印检测：行频统计、非中文占比、关键词正则的多特征打分漏斗（困惑度等高级特征可后放）。产出红黄高亮 + 侧边栏可疑列表。纯本地、可解释、零成本。
@@ -219,7 +240,7 @@ LLM 客户端定义为可替换的接口（Rust trait）。核心库依赖「能
 - 动手前确认当前处于路线图哪个阶段，不要跨阶段实现未到的功能（尤其不要在阶段四之前引入 LLM 依赖）。
 - 任何核心库代码不得 import Tauri 或前端相关依赖，保持核心库可独立编译与测试。
 - 为核心库的每个模块编写单元测试，尤其编码探测、章节解析、水印检测——这些逻辑密集且易回归。
-- 修改领域模型类型前，检查所有消费方；阶段二后修改富标注输出契约需格外谨慎。
+- **富标注输出契约已于阶段一末冻结**（详见 `crates/core/src/domain.rs` 模块顶部 doc comment）。任何对 `Span` / `CleaningAnnotation` / `Chapter` / `Volume` / `PipelineOutput` 已有字段的改动，必须先把改动方案呈给用户确认，并跨模块清点所有消费方（界面层、EPUB 构建、未来水印检测）。新增字段比改动已有字段更安全。
 - 涉及 EPUB 构建的改动，提示用户做真机验证。
 - 遵循「智能默认 + 高级选项」：每个自动化功能都应有手动覆盖入口。
 - 提交信息和注释使用中文或英文均可，保持与现有代码一致。

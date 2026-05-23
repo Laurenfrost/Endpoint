@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use endpoint_core::{convert as core_convert, Metadata};
+use endpoint_core::{convert as core_convert, ConvertOptions, Metadata};
 use tauri::async_runtime;
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
@@ -76,8 +76,14 @@ pub async fn convert(
         let metadata = Metadata::new(title, author);
         let input_p = PathBuf::from(input);
         let output_p = PathBuf::from(output);
-        let kepubify_p = kepubify_path.map(PathBuf::from);
-        core_convert(&input_p, &output_p, metadata, kepubify_p.as_deref())
+        // 阶段一:桥接层暂不暴露编码覆盖/规则文件入口,使用默认 ConvertOptions(自动探测 + 内置规则)。
+        // 阶段二的界面会改用 run_pipeline + build_epub_from 拆两步走,届时再加这些参数。
+        let options = ConvertOptions {
+            encoding_override: None,
+            rules_path: None,
+            kepubify_path: kepubify_path.map(PathBuf::from),
+        };
+        core_convert(&input_p, &output_p, metadata, &options)
     })
     .await
     .map_err(|e| format!("任务调度失败: {e}"))?
