@@ -7,6 +7,14 @@
 //! 阶段三(超长区间检测)、阶段四(LLM 兜底)不在本阶段实现。整本未识别任何标题时
 //! 沿用阶段零的「单章 Fallback」兜底。
 //!
+//! # 阶段三签名拆分(`docs/stage3-design.md` 第五节 5.2.a 决议)
+//!
+//! [`parse`] 只识别 chapter/volume 边界,产出的 [`Chapter::paragraphs`] 一律为空。
+//! 段落物化由独立函数 [`materialize_paragraphs`] 完成。
+//! 这样做的好处是:[`crate::watermark::analyze`] 在 [`parse`] 之后跑,
+//! 把 auto 水印镜像写入 cleaning 后,再调 [`materialize_paragraphs`] 时就能
+//! 一次性扣除"格式清洗 + 自动水印"两类删除,EPUB 输出路径单一不分支。
+//!
 //! # 关于 span 与坐标系
 //!
 //! 所有产出的 [`Chapter`] / [`Volume`] 的 `heading_span` / `body_span` 都指向**调用方传入的
@@ -43,17 +51,12 @@ struct HeadingCandidate {
     rule_id: String,
 }
 
-/// 解析章节。
+/// 解析章节边界。**不**填 [`Chapter::paragraphs`]——段落物化由 [`materialize_paragraphs`]
+/// 完成(阶段三签名拆分,详见模块文档与 `docs/stage3-design.md` 第五节)。
 ///
-/// - `source`:解码后(可能未清洗)的源文本——所有 span 的坐标参照系。
-/// - `cleaning`:清洗标注,只在装配每章 `paragraphs` 时应用;**不影响**章节/卷的边界。
+/// - `source`:解码后的源文本——所有 span 的坐标参照系。
 /// - `rules`:规则库。仅消费 `Chapter` / `Volume` 两类规则。
-pub fn parse(
-    source: &str,
-    cleaning_anns: &[CleaningAnnotation],
-    rules: &RuleSet,
-    metadata: Metadata,
-) -> Result<Book, ChapterError> {
+pub fn parse(source: &str, rules: &RuleSet, metadata: Metadata) -> Result<Book, ChapterError> {
     // 预编译规则集,按优先级降序。
     let chapter_rules = compile_rules(rules, RuleKind::Chapter)?;
     let volume_rules = compile_rules(rules, RuleKind::Volume)?;
@@ -93,7 +96,7 @@ pub fn parse(
 
     // 兜底:整本未识别出任何候选。
     if candidates.is_empty() {
-        return Ok(fallback_book(source, cleaning_anns, metadata));
+        return Ok(fallback_book(source, metadata));
     }
 
     // 第二阶段:卷章层级组织。
@@ -110,7 +113,7 @@ pub fn parse(
         {
             entries.push(BookEntry::Chapter(Chapter {
                 title: "楔子".into(),
-                paragraphs: paragraphs_from(source, preface_span, cleaning_anns),
+                paragraphs: Vec::new(), // 由 materialize_paragraphs 填
                 heading_span: Span::new(0, 0), // 无显式标题行
                 body_span: preface_span,
                 origin: ChapterOrigin::Fallback,
@@ -150,7 +153,7 @@ pub fn parse(
                 {
                     let preface = Chapter {
                         title: "(卷前)".into(),
-                        paragraphs: paragraphs_from(source, body_span, cleaning_anns),
+                        paragraphs: Vec::new(), // 由 materialize_paragraphs 填
                         heading_span: Span::new(cand.heading_span.end, cand.heading_span.end),
                         body_span,
                         origin: ChapterOrigin::Fallback,
@@ -164,7 +167,7 @@ pub fn parse(
             HeadingLevel::Chapter => {
                 let chapter = Chapter {
                     title: cand.title.clone(),
-                    paragraphs: paragraphs_from(source, body_span, cleaning_anns),
+                    paragraphs: Vec::new(), // 由 materialize_paragraphs 填
                     heading_span: cand.heading_span,
                     body_span,
                     origin: ChapterOrigin::RegexMatch,
@@ -185,6 +188,30 @@ pub fn parse(
     }
 
     Ok(Book { metadata, entries })
+}
+
+/// 把段落物化到 [`Book`] 上,填充每个 [`Chapter::paragraphs`]。
+///
+/// 调用方应当在 [`crate::watermark::analyze`] 之后、auto 水印已镜像到 `cleaning` 之后
+/// 再调本函数,使一次物化同时扣除"格式清洗 + 自动水印"两类删除。
+///
+/// `cleaning` 必须按 `span.start` 升序、互不重叠(即 [`crate::cleaning::analyze`] 的
+/// 输出形式,或经 `merge_auto_watermarks_into_cleaning` 合并后的形式)。
+///
+/// 重入安全:本函数会**覆盖**每章既有 paragraphs(若已被填过)。
+pub fn materialize_paragraphs(book: &mut Book, source: &str, cleaning: &[CleaningAnnotation]) {
+    for entry in &mut book.entries {
+        match entry {
+            BookEntry::Chapter(c) => {
+                c.paragraphs = paragraphs_from(source, c.body_span, cleaning);
+            }
+            BookEntry::Volume(v) => {
+                for c in &mut v.chapters {
+                    c.paragraphs = paragraphs_from(source, c.body_span, cleaning);
+                }
+            }
+        }
+    }
 }
 
 fn compile_rules(rules: &RuleSet, kind: RuleKind) -> Result<Vec<(String, Regex)>, RulesError> {
@@ -257,11 +284,11 @@ fn paragraphs_from(source: &str, span: Span, cleaning_anns: &[CleaningAnnotation
         .collect()
 }
 
-fn fallback_book(source: &str, cleaning_anns: &[CleaningAnnotation], metadata: Metadata) -> Book {
+fn fallback_book(source: &str, metadata: Metadata) -> Book {
     let span = Span::new(0, source.len());
     let entries = vec![BookEntry::Chapter(Chapter {
         title: metadata.title.clone(),
-        paragraphs: paragraphs_from(source, span, cleaning_anns),
+        paragraphs: Vec::new(), // 由 materialize_paragraphs 填
         heading_span: Span::new(0, 0),
         body_span: span,
         origin: ChapterOrigin::Fallback,
@@ -293,15 +320,12 @@ mod tests {
     use super::*;
     use crate::cleaning;
 
+    /// 测试辅助:跑完整"边界识别 + 物化"两步,与阶段二 `parse(.., cleaning, ..)` 行为等价。
     fn parse_default(text: &str) -> Book {
         let cleaning_anns = cleaning::analyze(text);
-        parse(
-            text,
-            &cleaning_anns,
-            &RuleSet::builtin(),
-            Metadata::new("测试书", "测试作者"),
-        )
-        .unwrap()
+        let mut book = parse(text, &RuleSet::builtin(), Metadata::new("测试书", "测试作者")).unwrap();
+        materialize_paragraphs(&mut book, text, &cleaning_anns);
+        book
     }
 
     fn flatten_titles(book: &Book) -> Vec<&str> {
@@ -485,5 +509,67 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    /// 阶段三签名拆分:`parse` 单独调用时,所有 chapter 的 paragraphs 必须为空,
+    /// 物化只能由 [`materialize_paragraphs`] 完成。
+    #[test]
+    fn parse_alone_leaves_paragraphs_empty() {
+        let text = "\
+第一卷 风起
+第一章 起
+正文1
+第二章 承
+正文2
+第二卷 云涌
+第三章 转
+正文3
+";
+        let book = parse(text, &RuleSet::builtin(), Metadata::new("测试", "作者")).unwrap();
+        for entry in &book.entries {
+            match entry {
+                BookEntry::Chapter(c) => assert!(
+                    c.paragraphs.is_empty(),
+                    "parse 单独调用时 Chapter.paragraphs 必须为空"
+                ),
+                BookEntry::Volume(v) => {
+                    for c in &v.chapters {
+                        assert!(
+                            c.paragraphs.is_empty(),
+                            "parse 单独调用时卷内 Chapter.paragraphs 必须为空"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// `materialize_paragraphs` 应当填充所有章(包括卷内章)的 paragraphs,且重入覆盖。
+    #[test]
+    fn materialize_paragraphs_fills_volumes_and_is_idempotent() {
+        let text = "第一卷 风起\n第一章 起\n正文1\n正文2\n第二卷 云涌\n第三章 转\n正文3\n";
+        let mut book = parse(text, &RuleSet::builtin(), Metadata::new("测试", "作者")).unwrap();
+        let cleaning_anns = cleaning::analyze(text);
+
+        materialize_paragraphs(&mut book, text, &cleaning_anns);
+        // 卷 1 第一章应有 2 段;卷 2 第三章应有 1 段。
+        let first_vol = match &book.entries[0] {
+            BookEntry::Volume(v) => v,
+            _ => panic!(),
+        };
+        assert_eq!(first_vol.chapters[0].paragraphs.len(), 2);
+        let second_vol = match &book.entries[1] {
+            BookEntry::Volume(v) => v,
+            _ => panic!(),
+        };
+        assert_eq!(second_vol.chapters[0].paragraphs.len(), 1);
+
+        // 重入:再调一次应当覆盖,而不是累加
+        materialize_paragraphs(&mut book, text, &cleaning_anns);
+        let first_vol2 = match &book.entries[0] {
+            BookEntry::Volume(v) => v,
+            _ => panic!(),
+        };
+        assert_eq!(first_vol2.chapters[0].paragraphs.len(), 2, "重入应覆盖,不应累加");
     }
 }

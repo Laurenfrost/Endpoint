@@ -9,10 +9,14 @@
 //! - **规则化章节解析**:[`chapter`] 模块消费 [`rules::RuleSet`],支持卷章两级层级。
 //! - **富标注契约冻结**:见 [`domain`] 模块顶部 doc comment。
 //!
+//! # 阶段三新增能力(进行中)
+//! - **本地水印检测**:[`watermark`] 模块,本地廉价、可解释、零 LLM 依赖。
+//!   3.0 子阶段只有骨架(`analyze` 返空);3.1/3.2 填三特征,3.3 接入 auto 镜像。
+//!
 //! # 三层管线 API
 //!
-//! 1. [`run_pipeline`]:从字节出发跑完编码 + 清洗 + 章节解析,产出 [`PipelineOutput`]
-//!    (含富标注,供阶段二的界面消费)。**不**写 EPUB。
+//! 1. [`run_pipeline`]:从字节出发跑完编码 + 清洗 + 章节边界 + 水印 + 段落物化,
+//!    产出 [`PipelineOutput`](含富标注,供阶段二的界面消费)。**不**写 EPUB。
 //! 2. [`build_epub_from`]:把 [`PipelineOutput`] 写为 EPUB,可选 kepubify。
 //! 3. [`convert`]:阶段零兼容入口——读文件 → 跑管线 → 写 EPUB → 可选 kepubify,
 //!    一站式调用。桥接层仍使用此入口,无需感知 [`PipelineOutput`]。
@@ -24,6 +28,7 @@ pub mod encoding;
 pub mod epub;
 pub mod kepubify;
 pub mod rules;
+pub mod watermark;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -87,6 +92,13 @@ pub struct ConvertOptions {
 /// 不读文件、不写文件——内存语义。便于核心库脱离 IO 单元测试。
 ///
 /// `progress` 用于向上层回报阶段进度;不需要进度时传 `&NoopSink`。
+///
+/// # 阶段三流水线顺序
+///
+/// 详见 `docs/stage3-design.md` 第五节 5.1:
+/// `decoding → cleaning → chapter::parse(只识别边界) → watermark → 合并 auto 镜像 → materialize_paragraphs`。
+///
+/// 3.0 子阶段:[`watermark::analyze`] 返回空列表,合并步骤为恒等,与阶段二行为等价。
 pub fn run_pipeline(
     bytes: &[u8],
     metadata: Metadata,
@@ -99,7 +111,7 @@ pub fn run_pipeline(
     progress.report("decoding", 100, Some(&source_encoding));
 
     progress.report("cleaning", 0, None);
-    let cleaning_anns = cleaning::analyze(&source_text);
+    let cleaning_anns_base = cleaning::analyze(&source_text);
     progress.report("cleaning", 100, None);
 
     progress.report("chapter", 0, None);
@@ -112,13 +124,34 @@ pub fn run_pipeline(
         None => RuleSet::builtin(),
     };
 
-    let book = chapter::parse(&source_text, &cleaning_anns, &rules, metadata)?;
+    let mut book = chapter::parse(&source_text, &rules, metadata)?;
     progress.report("chapter", 100, None);
+
+    // 阶段三:水印检测(3.0 骨架阶段返回空列表)。
+    progress.report("watermark", 0, None);
+    let wm_config = watermark::WatermarkConfig::default();
+    let watermarks = watermark::analyze(
+        &source_text,
+        &book,
+        &rules,
+        &cleaning_anns_base,
+        &wm_config,
+    );
+    progress.report("watermark", 100, None);
+
+    // auto 水印镜像 → cleaning(3.0 阶段 watermarks 为空,合并恒等)。
+    // 3.3 子阶段会实装 `merge_auto_watermarks_into_cleaning`;在此之前直接透传。
+    let cleaning_final = cleaning_anns_base;
+
+    // 物化段落:此时 cleaning_final 已含格式清洗(+ 未来的 auto 水印镜像),
+    // 一次物化即可同时扣除两类删除,EPUB 路径单一不分支。
+    chapter::materialize_paragraphs(&mut book, &source_text, &cleaning_final);
 
     Ok(PipelineOutput {
         source_text,
         source_encoding,
-        cleaning: cleaning_anns,
+        cleaning: cleaning_final,
+        watermark: watermarks,
         book,
     })
 }

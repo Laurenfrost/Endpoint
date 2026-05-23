@@ -50,9 +50,25 @@
 //! 还是兜底)与 `matched_rule_id`(若由规则命中则记录规则 id)。阶段二的预览界面据此把
 //! "高置信度章节"与"程序猜测的章节"区分开。
 //!
-//! ## 6. 冻结状态
+//! ## 6. 阶段三契约扩展:`watermark` 字段 + auto 镜像
+//!
+//! 阶段三的水印检测以 [`WatermarkAnnotation`] 列表存放在 [`PipelineOutput::watermark`] 字段。
+//! 该列表持**全部**水印评分明细(auto + suspect + scores + signals + verdict),供前端正文高亮、
+//! 侧边栏"为什么被标"、概览标尺消费。
+//!
+//! verdict == [`WatermarkVerdict::Auto`] 的水印**同时**镜像到 `cleaning` 列表中,
+//! kind 为 `CleaningKind::Watermark*` 三个变体之一。这样 EPUB / [`crate::chapter`] 物化路径
+//! 单一读 `cleaning` 即可同时扣除格式清洗 + 自动水印,不必感知 watermark 字段的存在。
+//! verdict == [`WatermarkVerdict::Suspect`] **不**进 cleaning,EPUB 输出中保留,
+//! 等待阶段四 approve/dismiss 交互后决策。
+//!
+//! 镜像不变式与重叠合并规则详见 `docs/stage3-design.md` 第二节。
+//!
+//! ## 7. 冻结状态
 //!
 //! 阶段一交付时本契约冻结。阶段二之后修改契约需特别谨慎;新增字段优于改动已有字段。
+//! 阶段三按 `docs/stage3-design.md` 第十节决策记录新增了 `watermark` 字段 + 3 个
+//! `CleaningKind::Watermark*` 变体,属于增量扩展,不破坏阶段二已冻结的字段名与形状。
 
 use serde::{Deserialize, Serialize};
 
@@ -101,10 +117,13 @@ pub struct CleaningAnnotation {
     pub replacement: Option<String>,
 }
 
-/// 清洗类型。阶段一限定为确定性、低风险的格式整理;水印类检测属阶段三,**不**写在这里。
+/// 清洗类型。前 4 个变体是阶段一的"确定性、低风险格式整理";后 3 个 `Watermark*` 变体
+/// 是阶段三新增的"自动判定水印的镜像入口"——详见模块文档第 6 节与
+/// `docs/stage3-design.md` 第二节。
 ///
-/// `#[serde(rename_all = "snake_case")]` 让前端拿到 `"fullwidth_space"` 等。
-/// 详见 `docs/stage2-design.md` 第三节枚举锁定。
+/// `#[serde(rename_all = "snake_case")]` 让前端拿到 `"fullwidth_space"` /
+/// `"watermark_keyword"` 等。详见 `docs/stage2-design.md` 第三节枚举锁定与
+/// `docs/stage3-design.md` 第二节扩展。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CleaningKind {
@@ -116,6 +135,25 @@ pub enum CleaningKind {
     ControlChar,
     /// 行尾尾随空白
     TrailingWhitespace,
+    /// 阶段三新增:auto 水印镜像——关键词正则命中
+    WatermarkKeyword,
+    /// 阶段三新增:auto 水印镜像——行频统计触发
+    WatermarkRepetition,
+    /// 阶段三新增:auto 水印镜像——非中文占比触发
+    WatermarkNonCjk,
+}
+
+impl CleaningKind {
+    /// 是否是阶段三 watermark 镜像变体(`WatermarkKeyword` / `WatermarkRepetition` /
+    /// `WatermarkNonCjk`)。前端按 kind 拆"清洗"与"水印"两层时使用。
+    pub fn is_watermark(self) -> bool {
+        matches!(
+            self,
+            CleaningKind::WatermarkKeyword
+                | CleaningKind::WatermarkRepetition
+                | CleaningKind::WatermarkNonCjk
+        )
+    }
 }
 
 /// 一本完整的书。所有内嵌 chapter/volume 的 span 都指向 [`PipelineOutput::source_text`]。
@@ -226,10 +264,62 @@ impl Metadata {
     }
 }
 
+/// 一条水印检测的输出。`span` 指向 [`PipelineOutput::source_text`] 中被命中的行
+/// (UTF-8 字节偏移,半开区间)。
+///
+/// 阶段三新增,详见模块文档第 6 节与 `docs/stage3-design.md` 第二节。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WatermarkAnnotation {
+    /// 被命中的行在 decoded source 中的区间。
+    pub span: Span,
+    /// 自动 / 灰区。
+    pub verdict: WatermarkVerdict,
+    /// 加权融合后的总分 `[0.0, 1.0]`。
+    pub score: f32,
+    /// 每个触发特征的明细。至少有一项。
+    pub signals: Vec<WatermarkSignal>,
+}
+
+/// 水印判定结果。`#[serde(rename_all = "snake_case")]` 让前端拿到 `"auto"` / `"suspect"`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WatermarkVerdict {
+    /// 分数 ≥ `auto_threshold`,自动判定为水印——同时镜像到 `cleaning` 列表让 EPUB 扣除。
+    Auto,
+    /// `suspect_threshold` ≤ 分数 < `auto_threshold`,灰区,前端黄色高亮 + 侧边栏列表,
+    /// **不**进 cleaning,EPUB 输出中保留。
+    Suspect,
+}
+
+/// 单个触发特征的评分明细。前端把多条 signal 展开成可解释列表
+/// (`"出现 87 次"` / `"60% 非中文字符"` / `"命中规则 builtin-watermark-url"`)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WatermarkSignal {
+    pub kind: WatermarkSignalKind,
+    /// 本特征自身的可疑度分数 `[0.0, 1.0]`。
+    pub score: f32,
+    /// 给前端展示的可解释文本。可空(纯调试场景)。
+    pub detail: Option<String>,
+}
+
+/// 水印特征类型。`#[serde(rename_all = "snake_case")]` 让前端拿到
+/// `"repetition"` / `"non_cjk_ratio"` / `"keyword_regex"`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WatermarkSignalKind {
+    /// 行频统计:本行内容在全文出现次数过高。
+    Repetition,
+    /// 非中文字符占比过高(URL / TG 链接 / 数字 ID 串等)。
+    NonCjkRatio,
+    /// 命中 [`crate::rules::RuleKind::Watermark`] 类规则。
+    KeywordRegex,
+}
+
 /// 核心库管线的完整输出。三处 UI 消费(正文高亮 / 侧边栏 / 概览标尺)与 EPUB 构建
 /// 全部从这里取数据。
 ///
-/// 序列化产物即阶段二的 `PipelineDto`,字段顺序与名称参见 `docs/stage2-design.md`。
+/// 序列化产物即阶段二的 `PipelineDto` + 阶段三 `watermark` 字段;字段顺序与名称参见
+/// `docs/stage2-design.md` 第三节与 `docs/stage3-design.md` 第二节。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineOutput {
     /// 解码后的源文本——所有 span 的坐标参照系。
@@ -237,7 +327,13 @@ pub struct PipelineOutput {
     /// 实际生效的编码标签(自动探测出的、或调用方手动覆盖的)。
     pub source_encoding: String,
     /// 清洗标注,按 `span.start` 升序排列且互不重叠。
+    /// 阶段三起:其中 kind 属于 `Watermark*` 变体的条目是 verdict==auto 的水印镜像。
     pub cleaning: Vec<CleaningAnnotation>,
+    /// 阶段三新增:水印检测的完整输出(auto + suspect + scores + signals)。
+    /// auto 类同时在 [`Self::cleaning`] 中镜像存在;suspect 仅在此。
+    /// 详见模块文档第 6 节与 `docs/stage3-design.md` 第二节"镜像不变式"。
+    #[serde(default)]
+    pub watermark: Vec<WatermarkAnnotation>,
     /// 章节/卷结构。所有内嵌 span 都指向 `source_text`。
     pub book: Book,
 }
@@ -300,20 +396,52 @@ mod tests {
     }
 
     /// **契约锁定测试**:验证 `PipelineOutput` 序列化后的 JSON 字段名与
-    /// `docs/stage2-design.md` 第三节冻结的 shape 完全一致。
+    /// `docs/stage2-design.md` 第三节 + `docs/stage3-design.md` 第二节冻结的 shape 完全一致。
     ///
     /// 一旦该测试失败,意味着 IPC 契约被改动——必须同步更新设计文档与前端代码,
     /// **不要**简单调整测试期望值"让它过"。
     #[test]
     fn pipeline_output_json_shape_is_frozen() {
+        let auto_wm_span = Span::new(70, 80);
+        let suspect_wm_span = Span::new(85, 92);
         let pipeline = PipelineOutput {
             source_text: "第一卷 风云起\n第一章 起\n正文内容".into(),
             source_encoding: "UTF-8".into(),
-            cleaning: vec![CleaningAnnotation {
-                span: Span::new(0, 3),
-                kind: CleaningKind::FullwidthSpace,
-                replacement: Some(" ".into()),
-            }],
+            cleaning: vec![
+                CleaningAnnotation {
+                    span: Span::new(0, 3),
+                    kind: CleaningKind::FullwidthSpace,
+                    replacement: Some(" ".into()),
+                },
+                // auto 水印镜像 —— 与下面 watermark[0] span 严格一致
+                CleaningAnnotation {
+                    span: auto_wm_span,
+                    kind: CleaningKind::WatermarkKeyword,
+                    replacement: None,
+                },
+            ],
+            watermark: vec![
+                WatermarkAnnotation {
+                    span: auto_wm_span,
+                    verdict: WatermarkVerdict::Auto,
+                    score: 0.91,
+                    signals: vec![WatermarkSignal {
+                        kind: WatermarkSignalKind::KeywordRegex,
+                        score: 1.0,
+                        detail: Some("命中规则 builtin-watermark-url".into()),
+                    }],
+                },
+                WatermarkAnnotation {
+                    span: suspect_wm_span,
+                    verdict: WatermarkVerdict::Suspect,
+                    score: 0.42,
+                    signals: vec![WatermarkSignal {
+                        kind: WatermarkSignalKind::Repetition,
+                        score: 0.78,
+                        detail: Some("出现 9 次".into()),
+                    }],
+                },
+            ],
             book: Book {
                 metadata: Metadata {
                     title: "测试书".into(),
@@ -351,18 +479,72 @@ mod tests {
 
         let v: serde_json::Value = serde_json::to_value(&pipeline).unwrap();
 
-        // 顶层字段
+        // 顶层字段(阶段二 4 项 + 阶段三 watermark)
         assert!(v.get("source_text").is_some(), "缺 source_text");
         assert!(v.get("source_encoding").is_some(), "缺 source_encoding");
         assert!(v.get("cleaning").is_some(), "缺 cleaning");
+        assert!(v.get("watermark").is_some(), "阶段三:缺 watermark");
         assert!(v.get("book").is_some(), "缺 book");
 
-        // cleaning 字段
+        // cleaning[0] 仍是阶段二的 FullwidthSpace
         let c0 = &v["cleaning"][0];
         assert_eq!(c0["span"]["start"], 0);
         assert_eq!(c0["span"]["end"], 3);
         assert_eq!(c0["kind"], "fullwidth_space", "枚举变体应为 snake_case");
         assert_eq!(c0["replacement"], " ");
+
+        // cleaning[1] 是阶段三 auto 水印镜像
+        let c1 = &v["cleaning"][1];
+        assert_eq!(c1["span"]["start"], auto_wm_span.start);
+        assert_eq!(c1["span"]["end"], auto_wm_span.end);
+        assert_eq!(c1["kind"], "watermark_keyword");
+        assert_eq!(c1["replacement"], serde_json::Value::Null);
+
+        // watermark[0] = auto,字段名锁定为 span / verdict / score / signals
+        let w0 = &v["watermark"][0];
+        assert_eq!(w0["span"]["start"], auto_wm_span.start);
+        assert_eq!(w0["span"]["end"], auto_wm_span.end);
+        assert_eq!(w0["verdict"], "auto");
+        assert!(w0["score"].as_f64().is_some(), "score 必须是数值");
+        assert!(w0["signals"].is_array());
+        // signal 字段名锁定为 kind / score / detail
+        let s0 = &w0["signals"][0];
+        assert_eq!(s0["kind"], "keyword_regex");
+        assert!(s0["score"].as_f64().is_some());
+        assert_eq!(s0["detail"], "命中规则 builtin-watermark-url");
+
+        // watermark[1] = suspect
+        assert_eq!(v["watermark"][1]["verdict"], "suspect");
+        assert_eq!(v["watermark"][1]["signals"][0]["kind"], "repetition");
+
+        // 镜像不变式:auto 水印的 span 也必须出现在 cleaning 列表里
+        let auto_span_in_cleaning = v["cleaning"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| {
+                c["span"]["start"] == auto_wm_span.start
+                    && c["span"]["end"] == auto_wm_span.end
+                    && c["kind"]
+                        .as_str()
+                        .map(|s| s.starts_with("watermark_"))
+                        .unwrap_or(false)
+            });
+        assert!(auto_span_in_cleaning, "auto 水印应当镜像到 cleaning");
+
+        // 镜像不变式:suspect 水印的 span **不应**出现在 cleaning 列表里
+        let suspect_span_in_cleaning = v["cleaning"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| {
+                c["span"]["start"] == suspect_wm_span.start
+                    && c["span"]["end"] == suspect_wm_span.end
+            });
+        assert!(
+            !suspect_span_in_cleaning,
+            "suspect 水印不应镜像到 cleaning"
+        );
 
         // metadata.cover 必须 **不在** 输出里(skip_serializing)
         assert!(
@@ -394,5 +576,39 @@ mod tests {
         assert_eq!(ext["type"], "chapter");
         assert_eq!(ext["origin"], "fallback");
         assert_eq!(ext["matched_rule_id"], serde_json::Value::Null);
+    }
+
+    /// 锁定阶段三 `CleaningKind` 完整 7 项变体名(snake_case)。
+    /// 若有人新增/改名变体而忘记更新设计文档第二节,本测试会拦下。
+    #[test]
+    fn cleaning_kind_serializes_all_seven_variants_snake_case() {
+        use serde_json::to_string;
+        assert_eq!(to_string(&CleaningKind::BlankLineCompression).unwrap(), "\"blank_line_compression\"");
+        assert_eq!(to_string(&CleaningKind::FullwidthSpace).unwrap(),       "\"fullwidth_space\"");
+        assert_eq!(to_string(&CleaningKind::ControlChar).unwrap(),          "\"control_char\"");
+        assert_eq!(to_string(&CleaningKind::TrailingWhitespace).unwrap(),   "\"trailing_whitespace\"");
+        assert_eq!(to_string(&CleaningKind::WatermarkKeyword).unwrap(),     "\"watermark_keyword\"");
+        assert_eq!(to_string(&CleaningKind::WatermarkRepetition).unwrap(),  "\"watermark_repetition\"");
+        assert_eq!(to_string(&CleaningKind::WatermarkNonCjk).unwrap(),      "\"watermark_non_cjk\"");
+    }
+
+    /// 锁定 `WatermarkVerdict` 与 `WatermarkSignalKind` 的 snake_case 变体名。
+    #[test]
+    fn watermark_enums_serialize_snake_case() {
+        use serde_json::to_string;
+        assert_eq!(to_string(&WatermarkVerdict::Auto).unwrap(),    "\"auto\"");
+        assert_eq!(to_string(&WatermarkVerdict::Suspect).unwrap(), "\"suspect\"");
+        assert_eq!(to_string(&WatermarkSignalKind::Repetition).unwrap(),   "\"repetition\"");
+        assert_eq!(to_string(&WatermarkSignalKind::NonCjkRatio).unwrap(),  "\"non_cjk_ratio\"");
+        assert_eq!(to_string(&WatermarkSignalKind::KeywordRegex).unwrap(), "\"keyword_regex\"");
+    }
+
+    #[test]
+    fn cleaning_kind_is_watermark_helper() {
+        assert!(!CleaningKind::FullwidthSpace.is_watermark());
+        assert!(!CleaningKind::BlankLineCompression.is_watermark());
+        assert!(CleaningKind::WatermarkKeyword.is_watermark());
+        assert!(CleaningKind::WatermarkRepetition.is_watermark());
+        assert!(CleaningKind::WatermarkNonCjk.is_watermark());
     }
 }
