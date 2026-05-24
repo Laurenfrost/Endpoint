@@ -89,6 +89,11 @@ pub struct ConvertOptions {
     /// (智能默认:`auto=0.70` / `suspect=0.35`,权重 `0.40/0.20/0.40`)。
     /// 阶段三 3.5(推迟到阶段四开头)前,前端**不**会传此字段;桥接层用 `default()`。
     pub watermark: Option<watermark::WatermarkConfig>,
+    /// **阶段三 v2 新增**:清洗策略配置(每个 kind 一个 enabled 开关)。
+    /// `None` = 使用 [`cleaning::CleaningConfig::default()`](智能默认:段首全角**保留**,
+    /// 其余 4 个开)。前端 Stage2 顶部"清洗策略"折叠面板可改;改后调
+    /// `load_and_analyze` 重新分析。详见 `docs/stage3-v2-design.md` 第三节。
+    pub cleaning: Option<cleaning::CleaningConfig>,
 }
 
 /// 阶段二界面会消费的入口:从字节运行完整文本管线,产出富标注。
@@ -115,7 +120,8 @@ pub fn run_pipeline(
     progress.report("decoding", 100, Some(&source_encoding));
 
     progress.report("cleaning", 0, None);
-    let cleaning_anns_base = cleaning::analyze(&source_text);
+    let cleaning_config = options.cleaning.clone().unwrap_or_default();
+    let cleaning_anns_base = cleaning::analyze(&source_text, &cleaning_config);
     progress.report("cleaning", 100, None);
 
     progress.report("chapter", 0, None);
@@ -385,8 +391,8 @@ mod tests {
             text.push('\n');
             text.push_str(&format!("正文 {}\n", i));
         }
-        // 加些会触发 cleaning 的全角空格
-        text.push_str("\u{3000}有缩进的一行。\n");
+        // 加些会触发 cleaning 的行尾空白(v2 默认开,稳定触发 TrailingWhitespace)
+        text.push_str("有尾随空白的一行。   \n");
 
         let pipeline = run_pipeline(
             text.as_bytes(),
@@ -411,12 +417,12 @@ mod tests {
             );
         }
 
-        // 校验既有 cleaning 类型(FullwidthSpace)与镜像(WatermarkKeyword) 都出现
+        // 校验既有 cleaning 类型(TrailingWhitespace)与镜像(WatermarkKeyword) 都出现
         let kinds: std::collections::HashSet<CleaningKind> =
             pipeline.cleaning.iter().map(|c| c.kind).collect();
         assert!(
-            kinds.iter().any(|k| matches!(k, CleaningKind::FullwidthSpace)),
-            "应当出现原 cleaning FullwidthSpace"
+            kinds.iter().any(|k| matches!(k, CleaningKind::TrailingWhitespace)),
+            "应当出现原 cleaning TrailingWhitespace"
         );
         assert!(
             kinds.iter().any(|k| k.is_watermark()),

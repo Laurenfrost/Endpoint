@@ -321,8 +321,12 @@ mod tests {
     use crate::cleaning;
 
     /// 测试辅助:跑完整"边界识别 + 物化"两步,与阶段二 `parse(.., cleaning, ..)` 行为等价。
+    /// v2 起 cleaning::analyze 需 config——这里用 `cfg_with_leading` 保留 v1 行为
+    /// (剥段首全角),让本模块旧测试的 paragraphs 期望不动。
     fn parse_default(text: &str) -> Book {
-        let cleaning_anns = cleaning::analyze(text);
+        let mut cfg = cleaning::CleaningConfig::default();
+        cfg.leading_fullwidth_space = true;
+        let cleaning_anns = cleaning::analyze(text, &cfg);
         let mut book = parse(text, &RuleSet::builtin(), Metadata::new("测试书", "测试作者")).unwrap();
         materialize_paragraphs(&mut book, text, &cleaning_anns);
         book
@@ -549,7 +553,7 @@ mod tests {
     fn materialize_paragraphs_fills_volumes_and_is_idempotent() {
         let text = "第一卷 风起\n第一章 起\n正文1\n正文2\n第二卷 云涌\n第三章 转\n正文3\n";
         let mut book = parse(text, &RuleSet::builtin(), Metadata::new("测试", "作者")).unwrap();
-        let cleaning_anns = cleaning::analyze(text);
+        let cleaning_anns = cleaning::analyze(text, &cleaning::CleaningConfig::default());
 
         materialize_paragraphs(&mut book, text, &cleaning_anns);
         // 卷 1 第一章应有 2 段;卷 2 第三章应有 1 段。

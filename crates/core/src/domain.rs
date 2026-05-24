@@ -117,23 +117,34 @@ pub struct CleaningAnnotation {
     pub replacement: Option<String>,
 }
 
-/// 清洗类型。前 4 个变体是阶段一的"确定性、低风险格式整理";后 3 个 `Watermark*` 变体
-/// 是阶段三新增的"自动判定水印的镜像入口"——详见模块文档第 6 节与
-/// `docs/stage3-design.md` 第二节。
+/// 清洗类型。**阶段三 v2 起共 8 个变体**:
+/// - 前 5 个是阶段一的"确定性、低风险格式整理";其中 `LeadingFullwidthSpace` 与
+///   `InlineFullwidthSpace` 是 v2 拆分 `FullwidthSpace` 而来(详见
+///   `docs/stage3-v2-design.md` 第三节 3.1)。
+/// - 后 3 个 `Watermark*` 变体是阶段三新增的"自动判定水印的镜像入口"——详见模块文档
+///   第 6 节与 `docs/stage3-design.md` 第二节。
 ///
-/// `#[serde(rename_all = "snake_case")]` 让前端拿到 `"fullwidth_space"` /
-/// `"watermark_keyword"` 等。详见 `docs/stage2-design.md` 第三节枚举锁定与
-/// `docs/stage3-design.md` 第二节扩展。
+/// `#[serde(rename_all = "snake_case")]` 让前端拿到 `"leading_fullwidth_space"` /
+/// `"watermark_keyword"` 等。
+///
+/// **v2 契约破坏**:阶段三 v1 时存在的 `fullwidth_space` snake_case 值在 v2.0 起消失,
+/// 拆为 `leading_fullwidth_space`(默认 disabled,保留段首缩进)+ `inline_fullwidth_space`
+/// (默认 enabled,清理行内连续多余全角)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CleaningKind {
     /// 多余空行压缩(连续 2 个及以上空行 → 保留 1 个)
     BlankLineCompression,
-    /// 全角空格 `U+3000` 替换为半角或删除
-    FullwidthSpace,
+    /// **v2 新增**:行首连续全角空格 `U+3000`(典型为中文段首缩进 2 全角)
+    /// 默认 `CleaningConfig::leading_fullwidth_space = false`——尊重中文排版习惯,**不**删除。
+    LeadingFullwidthSpace,
+    /// **v2 新增**:行内连续 ≥2 个全角空格(典型为排版错误,不应出现在段首之外)
+    /// 默认 `CleaningConfig::inline_fullwidth_space = true` 删除。
+    InlineFullwidthSpace,
     /// `U+0000`-`U+001F` 中的非可视控制字符(\t / \n 除外)被剥离
     ControlChar,
-    /// 行尾尾随空白
+    /// 行尾尾随空白。v2 起字符集扩展到 `\r` / NBSP(`U+00A0`)/
+    /// 零宽(`U+200B`-`U+200D`、`U+FEFF`)。
     TrailingWhitespace,
     /// 阶段三新增:auto 水印镜像——关键词正则命中
     WatermarkKeyword,
@@ -387,7 +398,7 @@ mod tests {
     fn cleaning_annotation_round_trips_through_json() {
         let a = CleaningAnnotation {
             span: Span::new(10, 12),
-            kind: CleaningKind::FullwidthSpace,
+            kind: CleaningKind::LeadingFullwidthSpace,
             replacement: Some(" ".into()),
         };
         let j = serde_json::to_string(&a).unwrap();
@@ -410,8 +421,8 @@ mod tests {
             cleaning: vec![
                 CleaningAnnotation {
                     span: Span::new(0, 3),
-                    kind: CleaningKind::FullwidthSpace,
-                    replacement: Some(" ".into()),
+                    kind: CleaningKind::LeadingFullwidthSpace,
+                    replacement: None,
                 },
                 // auto 水印镜像 —— 与下面 watermark[0] span 严格一致
                 CleaningAnnotation {
@@ -486,12 +497,12 @@ mod tests {
         assert!(v.get("watermark").is_some(), "阶段三:缺 watermark");
         assert!(v.get("book").is_some(), "缺 book");
 
-        // cleaning[0] 仍是阶段二的 FullwidthSpace
+        // cleaning[0] 是 v2 拆细后的 LeadingFullwidthSpace
         let c0 = &v["cleaning"][0];
         assert_eq!(c0["span"]["start"], 0);
         assert_eq!(c0["span"]["end"], 3);
-        assert_eq!(c0["kind"], "fullwidth_space", "枚举变体应为 snake_case");
-        assert_eq!(c0["replacement"], " ");
+        assert_eq!(c0["kind"], "leading_fullwidth_space", "v2 起拆细的 snake_case");
+        assert_eq!(c0["replacement"], serde_json::Value::Null);
 
         // cleaning[1] 是阶段三 auto 水印镜像
         let c1 = &v["cleaning"][1];
@@ -578,18 +589,20 @@ mod tests {
         assert_eq!(ext["matched_rule_id"], serde_json::Value::Null);
     }
 
-    /// 锁定阶段三 `CleaningKind` 完整 7 项变体名(snake_case)。
-    /// 若有人新增/改名变体而忘记更新设计文档第二节,本测试会拦下。
+    /// 锁定阶段三 v2 `CleaningKind` 完整 **8 项** 变体名(snake_case)。
+    /// 若有人新增/改名变体而忘记更新设计文档,本测试会拦下。
+    /// v2 破坏:`fullwidth_space` 已消失,拆为 `leading_fullwidth_space` + `inline_fullwidth_space`。
     #[test]
-    fn cleaning_kind_serializes_all_seven_variants_snake_case() {
+    fn cleaning_kind_serializes_all_eight_variants_snake_case() {
         use serde_json::to_string;
-        assert_eq!(to_string(&CleaningKind::BlankLineCompression).unwrap(), "\"blank_line_compression\"");
-        assert_eq!(to_string(&CleaningKind::FullwidthSpace).unwrap(),       "\"fullwidth_space\"");
-        assert_eq!(to_string(&CleaningKind::ControlChar).unwrap(),          "\"control_char\"");
-        assert_eq!(to_string(&CleaningKind::TrailingWhitespace).unwrap(),   "\"trailing_whitespace\"");
-        assert_eq!(to_string(&CleaningKind::WatermarkKeyword).unwrap(),     "\"watermark_keyword\"");
-        assert_eq!(to_string(&CleaningKind::WatermarkRepetition).unwrap(),  "\"watermark_repetition\"");
-        assert_eq!(to_string(&CleaningKind::WatermarkNonCjk).unwrap(),      "\"watermark_non_cjk\"");
+        assert_eq!(to_string(&CleaningKind::BlankLineCompression).unwrap(),  "\"blank_line_compression\"");
+        assert_eq!(to_string(&CleaningKind::LeadingFullwidthSpace).unwrap(), "\"leading_fullwidth_space\"");
+        assert_eq!(to_string(&CleaningKind::InlineFullwidthSpace).unwrap(),  "\"inline_fullwidth_space\"");
+        assert_eq!(to_string(&CleaningKind::ControlChar).unwrap(),           "\"control_char\"");
+        assert_eq!(to_string(&CleaningKind::TrailingWhitespace).unwrap(),    "\"trailing_whitespace\"");
+        assert_eq!(to_string(&CleaningKind::WatermarkKeyword).unwrap(),      "\"watermark_keyword\"");
+        assert_eq!(to_string(&CleaningKind::WatermarkRepetition).unwrap(),   "\"watermark_repetition\"");
+        assert_eq!(to_string(&CleaningKind::WatermarkNonCjk).unwrap(),       "\"watermark_non_cjk\"");
     }
 
     /// 锁定 `WatermarkVerdict` 与 `WatermarkSignalKind` 的 snake_case 变体名。
@@ -605,8 +618,11 @@ mod tests {
 
     #[test]
     fn cleaning_kind_is_watermark_helper() {
-        assert!(!CleaningKind::FullwidthSpace.is_watermark());
+        assert!(!CleaningKind::LeadingFullwidthSpace.is_watermark());
+        assert!(!CleaningKind::InlineFullwidthSpace.is_watermark());
         assert!(!CleaningKind::BlankLineCompression.is_watermark());
+        assert!(!CleaningKind::TrailingWhitespace.is_watermark());
+        assert!(!CleaningKind::ControlChar.is_watermark());
         assert!(CleaningKind::WatermarkKeyword.is_watermark());
         assert!(CleaningKind::WatermarkRepetition.is_watermark());
         assert!(CleaningKind::WatermarkNonCjk.is_watermark());

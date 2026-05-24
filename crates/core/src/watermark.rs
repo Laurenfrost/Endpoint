@@ -356,10 +356,11 @@ fn pick_priority_kind(a: CleaningKind, b: CleaningKind) -> CleaningKind {
 
 fn cleaning_kind_priority(k: CleaningKind) -> u8 {
     match k {
-        // 原 cleaning 4 变体之间相互不重叠(cleaning::analyze 保证),
+        // 原 cleaning 5 变体之间相互不重叠(cleaning::analyze 保证),
         // 故彼此优先级取相同高位即可。
         CleaningKind::BlankLineCompression
-        | CleaningKind::FullwidthSpace
+        | CleaningKind::LeadingFullwidthSpace
+        | CleaningKind::InlineFullwidthSpace
         | CleaningKind::ControlChar
         | CleaningKind::TrailingWhitespace => 10,
         CleaningKind::WatermarkKeyword => 3,
@@ -942,7 +943,7 @@ mod tests {
     fn merge_empty_watermarks_returns_cleaning_unchanged() {
         let cleaning = vec![CleaningAnnotation {
             span: Span::new(10, 12),
-            kind: CleaningKind::FullwidthSpace,
+            kind: CleaningKind::LeadingFullwidthSpace,
             replacement: Some(" ".into()),
         }];
         let out = merge_auto_into_cleaning(cleaning.clone(), &[]);
@@ -954,7 +955,7 @@ mod tests {
         // 镜像不变式 #2 的反向:suspect 必须不进入 cleaning
         let cleaning = vec![CleaningAnnotation {
             span: Span::new(0, 3),
-            kind: CleaningKind::FullwidthSpace,
+            kind: CleaningKind::LeadingFullwidthSpace,
             replacement: None,
         }];
         let wms = vec![make_suspect(Span::new(100, 120))];
@@ -966,7 +967,7 @@ mod tests {
     fn merge_auto_inserts_with_correct_kind_and_no_overlap() {
         let cleaning = vec![CleaningAnnotation {
             span: Span::new(0, 3),
-            kind: CleaningKind::FullwidthSpace,
+            kind: CleaningKind::LeadingFullwidthSpace,
             replacement: None,
         }];
         let wms = vec![
@@ -978,7 +979,7 @@ mod tests {
         assert_eq!(out.len(), 4);
         // 排序后
         assert_eq!(out[0].span, Span::new(0, 3));
-        assert_eq!(out[0].kind, CleaningKind::FullwidthSpace);
+        assert_eq!(out[0].kind, CleaningKind::LeadingFullwidthSpace);
         assert_eq!(out[1].span, Span::new(100, 120));
         assert_eq!(out[1].kind, CleaningKind::WatermarkKeyword);
         assert_eq!(out[1].replacement, None);
@@ -1040,7 +1041,7 @@ mod tests {
     fn merge_output_is_sorted_and_non_overlapping() {
         // 一堆乱序输入,验证输出严格按 start 升序、互不重叠
         let cleaning = vec![
-            CleaningAnnotation { span: Span::new(50, 55), kind: CleaningKind::FullwidthSpace, replacement: None },
+            CleaningAnnotation { span: Span::new(50, 55), kind: CleaningKind::LeadingFullwidthSpace, replacement: None },
             CleaningAnnotation { span: Span::new(0, 3), kind: CleaningKind::TrailingWhitespace, replacement: None },
         ];
         let wms = vec![

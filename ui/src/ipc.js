@@ -28,10 +28,16 @@ export const pickOutputFile = (defaultPath) =>
   invoke("pick_output_file", { defaultPath: defaultPath ?? null });
 export const pickExecutableFile = () => invoke("pick_executable_file");
 
-export const loadAndAnalyze = (inputPath, encodingOverride) =>
+/// 加载 txt + 跑完整管线。
+/// `cleaningConfig`:阶段三 v2 新增,前端策略面板的勾选状态(可选,缺省走 default)。
+///   形状:{ blank_line_compression, leading_fullwidth_space, inline_fullwidth_space,
+///          control_char, trailing_whitespace } —— 都是 bool;后端 #[serde(default)]
+///          允许只传部分字段。
+export const loadAndAnalyze = (inputPath, encodingOverride, cleaningConfig) =>
   invoke("load_and_analyze", {
     inputPath,
     encodingOverride: encodingOverride ?? null,
+    cleaningConfig: cleaningConfig ?? null,
   });
 
 export const buildEpub = ({ outputPath, title, author, kepubifyPath }) =>

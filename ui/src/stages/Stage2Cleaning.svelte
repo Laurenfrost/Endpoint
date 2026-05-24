@@ -2,23 +2,31 @@
   // 阶段 2:文本处理 —— 清洗(红)+ 水印 auto(橙)+ 水印 suspect(黄)。
   //
   // 数据流(阶段三 3.3 镜像后):
-  //   - pipeline.cleaning 中 kind 是 4 种格式整理变体之一 → cleaning 列表 + 红层
+  //   - pipeline.cleaning 中 kind 是 5 种格式整理变体之一 → cleaning 列表 + 红层
+  //     (v2 起从 4 拆细为 5:LeadingFullwidthSpace / InlineFullwidthSpace 拆开)
   //   - pipeline.cleaning 中 kind 是 watermark_* 变体之一 → 来自 auto 水印镜像 → 橙层
   //                                                          (不进 cleaning 列表,只在水印列表里显示)
   //   - pipeline.watermark 全量(auto + suspect)→ 水印列表;suspect → 黄层
   //
-  // 颜色与命名详见 `docs/stage3-design.md` 第六节 6.2。
+  // v2 新增:顶部"清洗策略"折叠面板——勾选改动后亮起"重新分析"按钮,点了重跑管线。
+  //
+  // 颜色与命名详见 `docs/stage3-design.md` 第六节 6.2 + `docs/stage3-v2-design.md` 第三节。
   import { pipeline } from "../stores/pipeline.svelte.js";
   import {
     setLayers,
     clearLayers,
     jumpToByteOffset,
   } from "../stores/annotations.svelte.js";
+  import { setBusy } from "../stores/progress.svelte.js";
+  import { setPipeline } from "../stores/pipeline.svelte.js";
+  import { loadAndAnalyze } from "../ipc.js";
   import { onDestroy } from "svelte";
 
+  // v2 起 8 项 CleaningKind 的中文 label
   const KIND_LABEL = {
     blank_line_compression: "空行压缩",
-    fullwidth_space: "全角空格",
+    leading_fullwidth_space: "段首全角缩进",
+    inline_fullwidth_space: "行内全角连排",
     control_char: "控制字符",
     trailing_whitespace: "行尾空白",
   };
@@ -28,6 +36,45 @@
     non_cjk_ratio: "非中文",
     keyword_regex: "关键词",
   };
+
+  // —— v2 清洗策略面板 ——
+  // 默认值与后端 CleaningConfig::default() 严格对齐;改后 dirty=true → 亮"重新分析"。
+  // 重新分析后用 lastApplied 重置 dirty 判定。
+  const DEFAULT_CFG = {
+    blank_line_compression: true,
+    leading_fullwidth_space: false, // v2 默认关:保留段首缩进
+    inline_fullwidth_space: true,
+    control_char: true,
+    trailing_whitespace: true,
+  };
+  let cfg = $state({ ...DEFAULT_CFG });
+  let lastApplied = $state({ ...DEFAULT_CFG });
+  const dirty = $derived(
+    Object.keys(DEFAULT_CFG).some((k) => cfg[k] !== lastApplied[k])
+  );
+  let strategyOpen = $state(false);
+  let reanalyzing = $state(false);
+  let reanalyzeError = $state("");
+
+  async function reanalyze() {
+    if (!pipeline.sourcePath) {
+      reanalyzeError = "无源文件路径,无法重新分析";
+      return;
+    }
+    reanalyzing = true;
+    reanalyzeError = "";
+    setBusy(true);
+    try {
+      const dto = await loadAndAnalyze(pipeline.sourcePath, null, { ...cfg });
+      setPipeline(dto, pipeline.sourcePath);
+      lastApplied = { ...cfg };
+    } catch (e) {
+      reanalyzeError = String(e);
+    } finally {
+      reanalyzing = false;
+      setBusy(false);
+    }
+  }
 
   // —— 数据派生 ——
   // 清洗列表只显示阶段二的 4 种格式整理变体(把 watermark_* 镜像剔除,后者在水印列表里看)。
@@ -152,6 +199,41 @@
   {#if !pipeline.dto}
     <p class="hint">请先在阶段 1 加载文件。</p>
   {:else}
+    <!-- ============ v2:清洗策略折叠面板 ============ -->
+    <section class="strategy">
+      <button class="strategy-header" onclick={() => (strategyOpen = !strategyOpen)} type="button">
+        <span class="caret">{strategyOpen ? "▼" : "▶"}</span>
+        清洗策略
+        <span class="muted">{Object.values(cfg).filter(Boolean).length} / 5 启用</span>
+        {#if dirty}<span class="dirty-dot" title="改动未应用"></span>{/if}
+      </button>
+      {#if strategyOpen}
+        <div class="strategy-body">
+          {#each Object.keys(DEFAULT_CFG) as k}
+            <label class="strat-row">
+              <input type="checkbox" bind:checked={cfg[k]} />
+              <span class="strat-label">{KIND_LABEL[k] ?? k}</span>
+              {#if k === "leading_fullwidth_space"}
+                <span class="strat-hint">中文段首习惯,v2 默认保留</span>
+              {/if}
+            </label>
+          {/each}
+          <div class="strategy-actions">
+            <button
+              class="reanalyze"
+              class:hot={dirty}
+              disabled={!dirty || reanalyzing}
+              onclick={reanalyze}
+              type="button"
+            >
+              {reanalyzing ? "分析中…" : dirty ? "重新分析" : "无改动"}
+            </button>
+            {#if reanalyzeError}<span class="err">{reanalyzeError}</span>{/if}
+          </div>
+        </div>
+      {/if}
+    </section>
+
     <!-- ============ 上半屏:格式清洗(红色) ============ -->
     <section class="block">
       <h3>
@@ -433,4 +515,77 @@
     border-radius: 3px;
   }
   .load-more:hover { background: #eef1f5; }
+
+  /* v2 策略折叠面板 */
+  .strategy {
+    margin-bottom: 14px;
+    background: #fff;
+    border: 1px solid #cbd2d9;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .strategy-header {
+    width: 100%;
+    background: #eef1f5;
+    border: none;
+    text-align: left;
+    padding: 6px 10px;
+    font-size: 11px;
+    color: #1f2933;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .strategy-header:hover { background: #e3e8ee; }
+  .strategy-header .caret { font-size: 9px; color: #52606d; }
+  .strategy-header .muted { color: #9aa5b1; font-size: 10px; margin-left: auto; }
+  .strategy-header .dirty-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #f59e0b;
+    box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.25);
+  }
+  .strategy-body {
+    padding: 8px 10px 6px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .strat-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: #1f2933;
+    cursor: pointer;
+  }
+  .strat-row input { margin: 0; }
+  .strat-label { min-width: 90px; }
+  .strat-hint { color: #9aa5b1; font-size: 10px; }
+  .strategy-actions {
+    margin-top: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .reanalyze {
+    background: #fff;
+    border: 1px solid #cbd2d9;
+    color: #9aa5b1;
+    padding: 4px 12px;
+    font-size: 11px;
+    border-radius: 3px;
+    cursor: not-allowed;
+  }
+  .reanalyze.hot {
+    background: #1f6feb;
+    border-color: #1f6feb;
+    color: #fff;
+    cursor: pointer;
+  }
+  .reanalyze.hot:hover { background: #1858c2; }
+  .reanalyze:disabled { cursor: not-allowed; opacity: 0.7; }
+  .err { color: #c62828; font-size: 10px; }
 </style>

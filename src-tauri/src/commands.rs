@@ -135,9 +135,20 @@ pub async fn load_and_analyze(
     state: State<'_, AppState>,
     input_path: String,
     encoding_override: Option<String>,
+    cleaning_config: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     let task_id = state.next_task_id("load");
     let cancel_flag = state.register_cancel(&task_id);
+
+    // 阶段三 v2:把前端传的 cleaning_config(JSON 对象)反序列化为 CleaningConfig。
+    // 反序列化失败时返回错误,不静默 fallback——避免用户改了配置但实际未生效。
+    let cleaning_cfg = match cleaning_config {
+        Some(v) => Some(
+            serde_json::from_value::<endpoint_core::cleaning::CleaningConfig>(v)
+                .map_err(|e| format!("cleaning_config 反序列化失败: {e}"))?,
+        ),
+        None => None,
+    };
 
     let app_for_sink = app.clone();
     let path_for_blocking = input_path.clone();
@@ -153,6 +164,8 @@ pub async fn load_and_analyze(
             cancel_token: Some(cancel_flag),
             // 阶段三 3.5(推迟到阶段四)之前用 default;前端暂无入口调阈值。
             watermark: None,
+            // 阶段三 v2 新增:前端策略面板的勾选状态
+            cleaning: cleaning_cfg,
         };
         // 阶段 1 不强制元数据,先用占位;阶段 4 通过 build_epub 的 title/author 参数覆盖。
         let metadata = Metadata::new("", "");
@@ -283,6 +296,7 @@ pub async fn convert(
             kepubify_path: kepubify_path.map(PathBuf::from),
             cancel_token: None,
             watermark: None,
+            cleaning: None,
         };
         core_convert(&input_p, &output_p, metadata, &options)
     })
