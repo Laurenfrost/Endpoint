@@ -85,6 +85,10 @@ pub struct ConvertOptions {
     /// 阶段二之后再实装:在 `cleaning::analyze` / `chapter::parse` 的主扫描循环里
     /// 每 N 行检查一次,若被置位则提前返回特定错误。
     pub cancel_token: Option<Arc<AtomicBool>>,
+    /// 阶段三新增:水印检测配置。`None` = 使用 [`watermark::WatermarkConfig::default()`]
+    /// (智能默认:`auto=0.70` / `suspect=0.35`,权重 `0.40/0.20/0.40`)。
+    /// 阶段三 3.5(推迟到阶段四开头)前,前端**不**会传此字段;桥接层用 `default()`。
+    pub watermark: Option<watermark::WatermarkConfig>,
 }
 
 /// 阶段二界面会消费的入口:从字节运行完整文本管线,产出富标注。
@@ -127,9 +131,9 @@ pub fn run_pipeline(
     let mut book = chapter::parse(&source_text, &rules, metadata)?;
     progress.report("chapter", 100, None);
 
-    // 阶段三:水印检测(3.0 骨架阶段返回空列表)。
+    // 阶段三:水印检测。
     progress.report("watermark", 0, None);
-    let wm_config = watermark::WatermarkConfig::default();
+    let wm_config = options.watermark.clone().unwrap_or_default();
     let watermarks = watermark::analyze(
         &source_text,
         &book,
@@ -139,11 +143,12 @@ pub fn run_pipeline(
     );
     progress.report("watermark", 100, None);
 
-    // auto 水印镜像 → cleaning(3.0 阶段 watermarks 为空,合并恒等)。
-    // 3.3 子阶段会实装 `merge_auto_watermarks_into_cleaning`;在此之前直接透传。
-    let cleaning_final = cleaning_anns_base;
+    // auto 水印镜像 → cleaning:把 verdict==auto 的 watermark 同 span 写入 cleaning
+    // (用 WatermarkKeyword/Repetition/NonCjk 三个 CleaningKind 变体),
+    // suspect 不进 cleaning。详见 `docs/stage3-design.md` 第二节"镜像不变式"。
+    let cleaning_final = watermark::merge_auto_into_cleaning(cleaning_anns_base, &watermarks);
 
-    // 物化段落:此时 cleaning_final 已含格式清洗(+ 未来的 auto 水印镜像),
+    // 物化段落:此时 cleaning_final 已含格式清洗 + auto 水印镜像,
     // 一次物化即可同时扣除两类删除,EPUB 路径单一不分支。
     chapter::materialize_paragraphs(&mut book, &source_text, &cleaning_final);
 
@@ -206,4 +211,216 @@ pub fn convert(
         options.kepubify_path.as_deref(),
         &NoopSink,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    //! 阶段三 3.3 端到端测试:验证 watermark auto 镜像在 `run_pipeline` 全链路上的效果。
+    //!
+    //! 这些测试不写文件、不调 EPUB 构建——只比较 `enabled = true/false` 两份 [`PipelineOutput`]
+    //! 的 cleaning / book.paragraphs 差异,确认 auto 水印被从段落正文里自然扣除。
+
+    use super::*;
+    use crate::domain::{BookEntry, CleaningKind, WatermarkVerdict};
+
+    /// 端到端:含明显水印的样本,enabled=true → 水印从 paragraphs 消失;
+    /// enabled=false → 水印保留在 paragraphs 中。
+    #[test]
+    fn auto_watermark_disappears_from_paragraphs_when_enabled() {
+        // 构造一个章节,正文里夹了 50 行典型水印行(keyword + repetition → auto)
+        let watermark_line = "本文首发于纵横中文网,谢谢支持";
+        let mut text = String::from("第一章 起\n正文开头一段。\n");
+        for i in 0..50 {
+            text.push_str(watermark_line);
+            text.push('\n');
+            text.push_str(&format!("普通正文第 {} 段。\n", i));
+        }
+        text.push_str("章节末尾。\n");
+        let bytes = text.as_bytes();
+
+        let enabled_opts = ConvertOptions::default();
+        let mut disabled_opts = ConvertOptions::default();
+        disabled_opts.watermark = Some({
+            let mut c = watermark::WatermarkConfig::default();
+            c.enabled = false;
+            c
+        });
+
+        let with_wm = run_pipeline(
+            bytes,
+            Metadata::new("测试书", "测试作者"),
+            &enabled_opts,
+            &NoopSink,
+        )
+        .expect("管线应成功");
+        let without_wm = run_pipeline(
+            bytes,
+            Metadata::new("测试书", "测试作者"),
+            &disabled_opts,
+            &NoopSink,
+        )
+        .expect("管线应成功");
+
+        // —— enabled:watermark 列表应当含 auto;cleaning 应当含 watermark_* kind ——
+        let auto_count = with_wm
+            .watermark
+            .iter()
+            .filter(|w| w.verdict == WatermarkVerdict::Auto)
+            .count();
+        assert!(auto_count >= 1, "应当至少识别出 1 个 auto 水印");
+        let cleaning_wm_count = with_wm
+            .cleaning
+            .iter()
+            .filter(|c| c.kind.is_watermark())
+            .count();
+        assert_eq!(
+            cleaning_wm_count, auto_count,
+            "镜像不变式:cleaning 中 watermark_* 数应当等于 auto 数"
+        );
+
+        // —— 章节 paragraphs:enabled 不应含水印行,disabled 应含 ——
+        fn collect_paragraphs(p: &PipelineOutput) -> Vec<String> {
+            let mut all = Vec::new();
+            for e in &p.book.entries {
+                match e {
+                    BookEntry::Chapter(c) => {
+                        for para in &c.paragraphs {
+                            all.push(para.as_str().to_string());
+                        }
+                    }
+                    BookEntry::Volume(v) => {
+                        for ch in &v.chapters {
+                            for para in &ch.paragraphs {
+                                all.push(para.as_str().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            all
+        }
+
+        let with_paragraphs = collect_paragraphs(&with_wm);
+        let without_paragraphs = collect_paragraphs(&without_wm);
+
+        let with_count = with_paragraphs
+            .iter()
+            .filter(|p| p.contains(watermark_line))
+            .count();
+        let without_count = without_paragraphs
+            .iter()
+            .filter(|p| p.contains(watermark_line))
+            .count();
+        assert_eq!(
+            with_count, 0,
+            "enabled=true:水印行不应出现在 paragraphs,实际 {} 次",
+            with_count
+        );
+        assert!(
+            without_count >= 1,
+            "enabled=false:水印行应保留在 paragraphs,实际 {} 次",
+            without_count
+        );
+
+        // —— 普通正文段落两份应当一致(水印移除不应影响其它内容) ——
+        let with_normal: Vec<&str> = with_paragraphs
+            .iter()
+            .filter(|p| !p.contains(watermark_line))
+            .map(String::as_str)
+            .collect();
+        let without_normal: Vec<&str> = without_paragraphs
+            .iter()
+            .filter(|p| !p.contains(watermark_line))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            with_normal, without_normal,
+            "去除水印后,正常段落两份应当一致"
+        );
+    }
+
+    /// suspect 不进 cleaning;EPUB 输出不会自动扣除 suspect 行。
+    #[test]
+    fn suspect_only_does_not_alter_cleaning_or_paragraphs() {
+        // 一行 keyword 命中 → 单特征 fused 0.40 → suspect(不重复,所以不会升 auto)
+        let text = "第一章 起\n正文一。\n本文首发于纵横中文网。\n正文二。\n";
+        let pipeline = run_pipeline(
+            text.as_bytes(),
+            Metadata::new("测试", "作者"),
+            &ConvertOptions::default(),
+            &NoopSink,
+        )
+        .unwrap();
+
+        // 应当至少有一个 suspect
+        assert!(
+            pipeline
+                .watermark
+                .iter()
+                .any(|w| w.verdict == WatermarkVerdict::Suspect),
+            "应当识别出 suspect 水印"
+        );
+        // cleaning 中应当**没有** watermark_* kind(suspect 不镜像)
+        assert!(
+            pipeline.cleaning.iter().all(|c| !c.kind.is_watermark()),
+            "suspect 不应该镜像到 cleaning:{:?}",
+            pipeline.cleaning
+        );
+        // paragraphs 应当保留水印行
+        let has_suspect_line = match &pipeline.book.entries[0] {
+            BookEntry::Chapter(c) => c.paragraphs.iter().any(|p| p.as_str().contains("纵横中文网")),
+            _ => false,
+        };
+        assert!(has_suspect_line, "suspect 行应保留在 paragraphs");
+    }
+
+    /// run_pipeline 输出的 cleaning 始终按 span.start 升序、互不重叠
+    /// (即使加入了 auto 水印镜像后)。
+    #[test]
+    fn pipeline_cleaning_stays_sorted_and_non_overlapping_after_mirror() {
+        let watermark_line = "首发于纵横中文网,更新最快";
+        let mut text = String::from("第一章\n");
+        for i in 0..30 {
+            text.push_str(watermark_line);
+            text.push('\n');
+            text.push_str(&format!("正文 {}\n", i));
+        }
+        // 加些会触发 cleaning 的全角空格
+        text.push_str("\u{3000}有缩进的一行。\n");
+
+        let pipeline = run_pipeline(
+            text.as_bytes(),
+            Metadata::new("测试", "作者"),
+            &ConvertOptions::default(),
+            &NoopSink,
+        )
+        .unwrap();
+
+        for w in pipeline.cleaning.windows(2) {
+            assert!(
+                w[0].span.start <= w[1].span.start,
+                "cleaning 未升序:{:?} 后跟 {:?}",
+                w[0],
+                w[1]
+            );
+            assert!(
+                w[0].span.end <= w[1].span.start,
+                "cleaning 重叠:{:?} vs {:?}",
+                w[0],
+                w[1]
+            );
+        }
+
+        // 校验既有 cleaning 类型(FullwidthSpace)与镜像(WatermarkKeyword) 都出现
+        let kinds: std::collections::HashSet<CleaningKind> =
+            pipeline.cleaning.iter().map(|c| c.kind).collect();
+        assert!(
+            kinds.iter().any(|k| matches!(k, CleaningKind::FullwidthSpace)),
+            "应当出现原 cleaning FullwidthSpace"
+        );
+        assert!(
+            kinds.iter().any(|k| k.is_watermark()),
+            "应当出现镜像后的 watermark_* kind"
+        );
+    }
 }

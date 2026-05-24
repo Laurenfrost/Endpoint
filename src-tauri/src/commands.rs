@@ -151,6 +151,8 @@ pub async fn load_and_analyze(
             rules_path: None,
             kepubify_path: None,
             cancel_token: Some(cancel_flag),
+            // 阶段三 3.5(推迟到阶段四)之前用 default;前端暂无入口调阈值。
+            watermark: None,
         };
         // 阶段 1 不强制元数据,先用占位;阶段 4 通过 build_epub 的 title/author 参数覆盖。
         let metadata = Metadata::new("", "");
@@ -280,6 +282,7 @@ pub async fn convert(
             rules_path: None,
             kepubify_path: kepubify_path.map(PathBuf::from),
             cancel_token: None,
+            watermark: None,
         };
         core_convert(&input_p, &output_p, metadata, &options)
     })

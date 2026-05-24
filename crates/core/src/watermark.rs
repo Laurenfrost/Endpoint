@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use regex::Regex;
 
 use crate::domain::{
-    Book, BookEntry, CleaningAnnotation, Span, WatermarkAnnotation, WatermarkSignal,
+    Book, BookEntry, CleaningAnnotation, CleaningKind, Span, WatermarkAnnotation, WatermarkSignal,
     WatermarkSignalKind, WatermarkVerdict,
 };
 use crate::rules::{RuleKind, RuleSet};
@@ -249,6 +249,123 @@ fn is_cjk(c: char) -> bool {
         || (0x3400..=0x4DBF).contains(&cp)
         || (0x3000..=0x303F).contains(&cp)
         || (0xFF00..=0xFFEF).contains(&cp)
+}
+
+/// 把 verdict==auto 的水印**镜像**到 `cleaning` 列表,使 EPUB 物化路径无感知地完成扣除。
+///
+/// 详见 `docs/stage3-design.md` 第二节"镜像不变式"与第五节 5.2:
+/// 1. 仅 verdict==auto 写入;suspect **不**进 cleaning。
+/// 2. 输出按 `span.start` 升序、互不重叠(保阶段二既定不变式)。
+/// 3. 重叠时取并集 span,kind 优先级:
+///    原 cleaning 4 变体 > `WatermarkKeyword` > `WatermarkRepetition` > `WatermarkNonCjk`。
+/// 4. 单条 watermark 的 kind 映射:取其 `signals` 中 score 最高那条 signal,按
+///    `KeywordRegex → WatermarkKeyword` / `Repetition → WatermarkRepetition` /
+///    `NonCjkRatio → WatermarkNonCjk` 映射;tie-break 用同优先级链。
+///
+/// 实现策略:把所有 cleaning + auto 镜像放入一个 Vec,按 (start, end) 排序,
+/// 然后线性扫描合并重叠区间。O((m+n) log (m+n)),m + n 量级远小于 source 字节数。
+pub fn merge_auto_into_cleaning(
+    cleaning: Vec<CleaningAnnotation>,
+    watermarks: &[WatermarkAnnotation],
+) -> Vec<CleaningAnnotation> {
+    // 收集 auto 镜像
+    let mut combined: Vec<CleaningAnnotation> = cleaning;
+    for w in watermarks {
+        if w.verdict != WatermarkVerdict::Auto {
+            continue;
+        }
+        combined.push(CleaningAnnotation {
+            span: w.span,
+            kind: signals_to_cleaning_kind(&w.signals),
+            replacement: None,
+        });
+    }
+
+    // 排序:start 升序,start 相同 end 升序——保证合并扫描可线性进行
+    combined.sort_by_key(|a| (a.span.start, a.span.end));
+
+    // 线性合并重叠区间
+    let mut out: Vec<CleaningAnnotation> = Vec::with_capacity(combined.len());
+    for ann in combined {
+        if let Some(last) = out.last_mut() {
+            if ann.span.start < last.span.end {
+                // 重叠:取并集 + 优先级 kind
+                let new_end = last.span.end.max(ann.span.end);
+                let new_kind = pick_priority_kind(last.kind, ann.kind);
+                // replacement 跟随 kind 来源:若 new_kind 来自 ann 则取 ann.replacement,
+                // 否则保留 last.replacement(已存在)。kind 相等时优先保留 last(早出现者)。
+                let new_replacement = if new_kind == ann.kind && new_kind != last.kind {
+                    ann.replacement
+                } else {
+                    last.replacement.take()
+                };
+                last.span = Span::new(last.span.start, new_end);
+                last.kind = new_kind;
+                last.replacement = new_replacement;
+                continue;
+            }
+        }
+        out.push(ann);
+    }
+
+    out
+}
+
+/// 从 signals 列表选出最适合做镜像 [`CleaningKind`] 的 signal。
+///
+/// 策略:取 score 最高那条;tie 时按 kind 优先级链 `KeywordRegex > Repetition > NonCjkRatio` 选。
+/// 这与第二节"镜像不变式 #3"的 watermark 子优先级保持一致。
+fn signals_to_cleaning_kind(signals: &[WatermarkSignal]) -> CleaningKind {
+    // signals 在 analyze 中保证至少有一条;若万一为空,退化到 WatermarkKeyword 占位
+    // (用 debug_assert 在 debug 构建中提示开发者)。
+    debug_assert!(!signals.is_empty(), "auto watermark 的 signals 不应为空");
+    let mut best_idx = 0;
+    let mut best_pri = signal_priority(signals[0].kind);
+    let mut best_score = signals[0].score;
+    for (i, s) in signals.iter().enumerate().skip(1) {
+        let pri = signal_priority(s.kind);
+        if s.score > best_score || (s.score == best_score && pri > best_pri) {
+            best_idx = i;
+            best_pri = pri;
+            best_score = s.score;
+        }
+    }
+    match signals[best_idx].kind {
+        WatermarkSignalKind::KeywordRegex => CleaningKind::WatermarkKeyword,
+        WatermarkSignalKind::Repetition => CleaningKind::WatermarkRepetition,
+        WatermarkSignalKind::NonCjkRatio => CleaningKind::WatermarkNonCjk,
+    }
+}
+
+fn signal_priority(k: WatermarkSignalKind) -> u8 {
+    match k {
+        WatermarkSignalKind::KeywordRegex => 3,
+        WatermarkSignalKind::Repetition => 2,
+        WatermarkSignalKind::NonCjkRatio => 1,
+    }
+}
+
+/// 重叠合并时的 kind 优先级:原 cleaning 4 变体 > watermark 3 变体(后者内部按 signal 同序)。
+fn pick_priority_kind(a: CleaningKind, b: CleaningKind) -> CleaningKind {
+    if cleaning_kind_priority(a) >= cleaning_kind_priority(b) {
+        a
+    } else {
+        b
+    }
+}
+
+fn cleaning_kind_priority(k: CleaningKind) -> u8 {
+    match k {
+        // 原 cleaning 4 变体之间相互不重叠(cleaning::analyze 保证),
+        // 故彼此优先级取相同高位即可。
+        CleaningKind::BlankLineCompression
+        | CleaningKind::FullwidthSpace
+        | CleaningKind::ControlChar
+        | CleaningKind::TrailingWhitespace => 10,
+        CleaningKind::WatermarkKeyword => 3,
+        CleaningKind::WatermarkRepetition => 2,
+        CleaningKind::WatermarkNonCjk => 1,
+    }
 }
 
 /// 按当前 [`WatermarkConfig`] 把 signals 列表融合为总分 `[0, 1]`。
@@ -787,5 +904,157 @@ mod tests {
         text.push_str("正文一段较长的内容用于占位。\n");
         let out = analyze_default(&text);
         assert!(out.is_empty(), "短行不应触发任何 signal,实际 {:?}", out);
+    }
+
+    // ============================================================================
+    // 3.3 新功能:merge_auto_into_cleaning(auto 镜像 + 优先级合并)
+    // ============================================================================
+
+    use crate::domain::CleaningKind;
+
+    fn make_auto(span: Span, kind: WatermarkSignalKind) -> WatermarkAnnotation {
+        WatermarkAnnotation {
+            span,
+            verdict: WatermarkVerdict::Auto,
+            score: 0.80,
+            signals: vec![WatermarkSignal {
+                kind,
+                score: 1.0,
+                detail: None,
+            }],
+        }
+    }
+
+    fn make_suspect(span: Span) -> WatermarkAnnotation {
+        WatermarkAnnotation {
+            span,
+            verdict: WatermarkVerdict::Suspect,
+            score: 0.40,
+            signals: vec![WatermarkSignal {
+                kind: WatermarkSignalKind::KeywordRegex,
+                score: 1.0,
+                detail: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn merge_empty_watermarks_returns_cleaning_unchanged() {
+        let cleaning = vec![CleaningAnnotation {
+            span: Span::new(10, 12),
+            kind: CleaningKind::FullwidthSpace,
+            replacement: Some(" ".into()),
+        }];
+        let out = merge_auto_into_cleaning(cleaning.clone(), &[]);
+        assert_eq!(out, cleaning);
+    }
+
+    #[test]
+    fn merge_suspect_only_does_not_touch_cleaning() {
+        // 镜像不变式 #2 的反向:suspect 必须不进入 cleaning
+        let cleaning = vec![CleaningAnnotation {
+            span: Span::new(0, 3),
+            kind: CleaningKind::FullwidthSpace,
+            replacement: None,
+        }];
+        let wms = vec![make_suspect(Span::new(100, 120))];
+        let out = merge_auto_into_cleaning(cleaning.clone(), &wms);
+        assert_eq!(out, cleaning, "suspect 不应进入 cleaning");
+    }
+
+    #[test]
+    fn merge_auto_inserts_with_correct_kind_and_no_overlap() {
+        let cleaning = vec![CleaningAnnotation {
+            span: Span::new(0, 3),
+            kind: CleaningKind::FullwidthSpace,
+            replacement: None,
+        }];
+        let wms = vec![
+            make_auto(Span::new(100, 120), WatermarkSignalKind::KeywordRegex),
+            make_auto(Span::new(200, 220), WatermarkSignalKind::Repetition),
+            make_auto(Span::new(300, 320), WatermarkSignalKind::NonCjkRatio),
+        ];
+        let out = merge_auto_into_cleaning(cleaning, &wms);
+        assert_eq!(out.len(), 4);
+        // 排序后
+        assert_eq!(out[0].span, Span::new(0, 3));
+        assert_eq!(out[0].kind, CleaningKind::FullwidthSpace);
+        assert_eq!(out[1].span, Span::new(100, 120));
+        assert_eq!(out[1].kind, CleaningKind::WatermarkKeyword);
+        assert_eq!(out[1].replacement, None);
+        assert_eq!(out[2].kind, CleaningKind::WatermarkRepetition);
+        assert_eq!(out[3].kind, CleaningKind::WatermarkNonCjk);
+    }
+
+    #[test]
+    fn merge_signals_to_cleaning_kind_picks_highest_score_then_priority() {
+        // signals 中三个 kind,score 相等 → 按优先级 keyword > repetition > non_cjk
+        let signals = vec![
+            WatermarkSignal { kind: WatermarkSignalKind::NonCjkRatio, score: 1.0, detail: None },
+            WatermarkSignal { kind: WatermarkSignalKind::KeywordRegex, score: 1.0, detail: None },
+            WatermarkSignal { kind: WatermarkSignalKind::Repetition, score: 1.0, detail: None },
+        ];
+        assert_eq!(signals_to_cleaning_kind(&signals), CleaningKind::WatermarkKeyword);
+
+        // 分数不等 → 取最高;此处 repetition score 最高
+        let signals = vec![
+            WatermarkSignal { kind: WatermarkSignalKind::KeywordRegex, score: 0.4, detail: None },
+            WatermarkSignal { kind: WatermarkSignalKind::Repetition, score: 0.9, detail: None },
+            WatermarkSignal { kind: WatermarkSignalKind::NonCjkRatio, score: 0.8, detail: None },
+        ];
+        assert_eq!(signals_to_cleaning_kind(&signals), CleaningKind::WatermarkRepetition);
+    }
+
+    #[test]
+    fn merge_overlap_preserves_original_cleaning_kind_and_union_span() {
+        // 已有 cleaning [10, 15) 类型 TrailingWhitespace;auto 水印 [12, 30) 类型 KeywordRegex
+        // 重叠 → 并集 [10, 30),kind = TrailingWhitespace(原 cleaning 优先级 > watermark)
+        let cleaning = vec![CleaningAnnotation {
+            span: Span::new(10, 15),
+            kind: CleaningKind::TrailingWhitespace,
+            replacement: None,
+        }];
+        let wms = vec![make_auto(Span::new(12, 30), WatermarkSignalKind::KeywordRegex)];
+        let out = merge_auto_into_cleaning(cleaning, &wms);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].span, Span::new(10, 30));
+        assert_eq!(out[0].kind, CleaningKind::TrailingWhitespace);
+    }
+
+    #[test]
+    fn merge_overlap_two_auto_watermarks_uses_priority_chain() {
+        // 两条 auto 水印重叠:[10, 25) Repetition + [20, 30) Keyword
+        // 排序后先扫 [10, 25);第二条 [20, 30) 重叠合并 → 并集 [10, 30)
+        // kind: keyword > repetition → Keyword
+        let wms = vec![
+            make_auto(Span::new(10, 25), WatermarkSignalKind::Repetition),
+            make_auto(Span::new(20, 30), WatermarkSignalKind::KeywordRegex),
+        ];
+        let out = merge_auto_into_cleaning(Vec::new(), &wms);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].span, Span::new(10, 30));
+        assert_eq!(out[0].kind, CleaningKind::WatermarkKeyword);
+    }
+
+    #[test]
+    fn merge_output_is_sorted_and_non_overlapping() {
+        // 一堆乱序输入,验证输出严格按 start 升序、互不重叠
+        let cleaning = vec![
+            CleaningAnnotation { span: Span::new(50, 55), kind: CleaningKind::FullwidthSpace, replacement: None },
+            CleaningAnnotation { span: Span::new(0, 3), kind: CleaningKind::TrailingWhitespace, replacement: None },
+        ];
+        let wms = vec![
+            make_auto(Span::new(200, 220), WatermarkSignalKind::KeywordRegex),
+            make_auto(Span::new(100, 120), WatermarkSignalKind::NonCjkRatio),
+            make_auto(Span::new(50, 60), WatermarkSignalKind::Repetition), // 与 cleaning [50,55) 重叠
+        ];
+        let out = merge_auto_into_cleaning(cleaning, &wms);
+        // 检查升序 + 不重叠
+        for w in out.windows(2) {
+            assert!(w[0].span.start <= w[1].span.start);
+            assert!(w[0].span.end <= w[1].span.start, "重叠未合并:{:?} vs {:?}", w[0], w[1]);
+        }
+        // 应有 4 条:[0,3) / [50,60)(合并) / [100,120) / [200,220)
+        assert_eq!(out.len(), 4);
     }
 }
