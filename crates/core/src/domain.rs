@@ -326,6 +326,54 @@ pub enum WatermarkSignalKind {
     KeywordRegex,
 }
 
+/// **阶段三 v2.2 新增**:用户对自动检测结果的覆盖决策。
+///
+/// 决策**仅本次转换会话**有效(reload 即失效),不持久化到文件。
+/// 决策语义详见 `docs/stage3-v2-design.md` 第三节 3.3:
+///
+/// | scope / 默认 verdict | approved | rejected |
+/// |---------------------|----------|----------|
+/// | cleaning(默认删) | 同默认(显式锁定) | **不删** |
+/// | watermark auto(默认删) | 同默认 | **不删**(从 cleaning 镜像移除) |
+/// | watermark suspect(默认保留) | **加入 cleaning**(等效升 auto) | 同默认 |
+///
+/// 即:三种"逆向改默认"的决策真正改变 EPUB 输出:
+///  - cleaning rejected:span 不删
+///  - watermark auto rejected:span 不删
+///  - watermark suspect approved:span 删
+///
+/// 其余三态决策(cleaning approved / auto approved / suspect rejected)只是
+/// "显式锁定默认行为",前端可视化用但不改 EPUB 内容。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct UserDecision {
+    pub span: Span,
+    pub scope: DecisionScope,
+    pub verdict: DecisionVerdict,
+}
+
+/// 决策作用域:cleaning 列表 / watermark 列表。
+///
+/// 注意:`Watermark` 不区分 auto / suspect——前端按 span 是否在
+/// `pipeline.cleaning` 中(且 kind 是 `Watermark*`)推断当前 verdict,后端按 span
+/// 在 `pipeline.watermark` 中找到对应 `WatermarkAnnotation` 拿 verdict。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionScope {
+    /// 来自 `PipelineOutput.cleaning` 列表(kind 是 5 种格式整理变体之一)。
+    Cleaning,
+    /// 来自 `PipelineOutput.watermark` 列表(auto + suspect)。
+    Watermark,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionVerdict {
+    /// 显式接受 = "确定要删除这个 span"。
+    Approved,
+    /// 显式拒绝 = "确定要保留这个 span"。
+    Rejected,
+}
+
 /// 核心库管线的完整输出。三处 UI 消费(正文高亮 / 侧边栏 / 概览标尺)与 EPUB 构建
 /// 全部从这里取数据。
 ///

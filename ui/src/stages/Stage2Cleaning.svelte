@@ -20,6 +20,15 @@
   import { setBusy } from "../stores/progress.svelte.js";
   import { setPipeline } from "../stores/pipeline.svelte.js";
   import { loadAndAnalyze } from "../ipc.js";
+  import {
+    decisions,
+    getDecision,
+    toggleDecision,
+    bulkSet,
+    bulkClear,
+    clearAllDecisions,
+    decisionCount,
+  } from "../stores/decisions.svelte.js";
   import { onDestroy } from "svelte";
 
   // v2 起 8 项 CleaningKind 的中文 label
@@ -83,6 +92,15 @@
       reanalyzeError = "无源文件路径,无法重新分析";
       return;
     }
+    // v2.2:重新分析会让 spans 全部失效,决策也跟着丢
+    const dropping = decisionCount();
+    if (dropping > 0) {
+      const ok = window.confirm(
+        `重新分析会清空已有的 ${dropping} 条决策(接受 / 拒绝),确定继续?`,
+      );
+      if (!ok) return;
+    }
+
     reanalyzing = true;
     reanalyzeError = "";
     setBusy(true);
@@ -96,6 +114,7 @@
       setPipeline(dto, pipeline.sourcePath);
       cleaningLastApplied = { ...cfg };
       wmLastApplied = { ...wmCfg };
+      clearAllDecisions(); // 清空全部决策
     } catch (e) {
       reanalyzeError = String(e);
     } finally {
@@ -103,6 +122,27 @@
       setBusy(false);
     }
   }
+
+  // —— v2.2 决策辅助函数 ——
+  function getCleaningDecision(span) {
+    return getDecision("cleaning", span);
+  }
+  function getWmDecision(span) {
+    return getDecision("watermark", span);
+  }
+  function toggleCleaningDecision(span, want) {
+    toggleDecision("cleaning", span, want);
+  }
+  function toggleWmDecision(span, want) {
+    toggleDecision("watermark", span, want);
+  }
+  // 批量栏:接受 / 拒绝 / 重置当前 tab 可见列表
+  function bulkApproveCleaning() { bulkSet("cleaning", cleaningItems.map((c) => c.span), "approved"); }
+  function bulkRejectCleaning()  { bulkSet("cleaning", cleaningItems.map((c) => c.span), "rejected"); }
+  function bulkClearCleaning()   { bulkClear("cleaning", cleaningItems.map((c) => c.span)); }
+  function bulkApproveWm() { bulkSet("watermark", wmFiltered.map((w) => w.span), "approved"); }
+  function bulkRejectWm()  { bulkSet("watermark", wmFiltered.map((w) => w.span), "rejected"); }
+  function bulkClearWm()   { bulkClear("watermark", wmFiltered.map((w) => w.span)); }
 
   // —— 水印阈值面板的字段元数据(label / step / kind) ——
   const WM_FIELDS = [
@@ -116,7 +156,7 @@
   ];
 
   // —— 数据派生 ——
-  // 清洗列表只显示阶段二的 4 种格式整理变体(把 watermark_* 镜像剔除,后者在水印列表里看)。
+  // 清洗列表只显示阶段二的 5 种格式整理变体(把 watermark_* 镜像剔除,后者在水印列表里看)。
   const cleaningItems = $derived(
     (pipeline.dto?.cleaning ?? []).filter((c) => !c.kind.startsWith("watermark_"))
   );
@@ -125,11 +165,11 @@
     for (const c of cleaningItems) m[c.kind] = (m[c.kind] ?? 0) + 1;
     return m;
   });
-  // auto 水印镜像在 cleaning 里的 span(仅作高亮源,不进列表)
+  // auto 水印镜像在 cleaning 里的 span
   const autoMirrorSpans = $derived(
     (pipeline.dto?.cleaning ?? [])
       .filter((c) => c.kind.startsWith("watermark_"))
-      .map((c) => ({ span: c.span }))
+      .map((c) => c.span)
   );
 
   // 水印列表(全部 verdict)
@@ -146,10 +186,47 @@
   const suspectSpans = $derived(
     watermarkItems
       .filter((w) => w.verdict === "suspect")
-      .map((w) => ({ span: w.span }))
+      .map((w) => w.span)
   );
 
-  // 注入三层 annotations。
+  // —— v2.2 effective view ——
+  // 用户决策叠加后,实际进 EPUB 的删除集合(也是文本区高亮的来源):
+  //   - cleaning rejected → 不进红层
+  //   - watermark auto rejected → 不进橙层
+  //   - watermark suspect approved → 升级到橙层(等效 auto)
+  //   - watermark suspect rejected → 仍在黄层(用户可视化)
+  // 这层派生让正文高亮 / OverviewRuler 与最终 EPUB 输出**口径一致**。
+  // 依赖 decisions.map(reactive)。
+  function spanMatches(targetMap, scope, span) {
+    return targetMap[`${scope}:${span.start}-${span.end}`];
+  }
+  const effectiveCleaningRedSpans = $derived(
+    cleaningItems
+      .filter((c) => spanMatches(decisions.map, "cleaning", c.span) !== "rejected")
+      .map((c) => c.span)
+  );
+  const effectiveAutoOrangeSpans = $derived.by(() => {
+    const out = [];
+    // 原 auto 镜像(过滤被 rejected 的)
+    for (const span of autoMirrorSpans) {
+      if (spanMatches(decisions.map, "watermark", span) !== "rejected") {
+        out.push(span);
+      }
+    }
+    // approved 的 suspect 也升级到橙
+    for (const w of watermarkItems) {
+      if (w.verdict === "suspect" && spanMatches(decisions.map, "watermark", w.span) === "approved") {
+        out.push(w.span);
+      }
+    }
+    return out;
+  });
+  const effectiveSuspectYellowSpans = $derived(
+    // suspect 仍在黄色(approved 升橙后,这里要扣掉)
+    suspectSpans.filter((span) => spanMatches(decisions.map, "watermark", span) !== "approved")
+  );
+
+  // 注入三层 annotations(effective view 驱动)。
   $effect(() => {
     if (!pipeline.dto) {
       clearLayers();
@@ -160,19 +237,19 @@
         id: "cleaning_format",
         color: "rgba(220, 53, 69, 0.55)",
         className: "hl-cleaning",
-        items: cleaningItems.map((c) => ({ span: c.span })),
+        items: effectiveCleaningRedSpans.map((span) => ({ span })),
       },
       {
         id: "watermark_auto",
         color: "rgba(255, 140, 0, 0.55)",
         className: "hl-watermark-auto",
-        items: autoMirrorSpans,
+        items: effectiveAutoOrangeSpans.map((span) => ({ span })),
       },
       {
         id: "watermark_suspect",
         color: "rgba(245, 196, 0, 0.55)",
         className: "hl-watermark-suspect",
-        items: suspectSpans,
+        items: effectiveSuspectYellowSpans.map((span) => ({ span })),
       },
     ]);
   });
@@ -324,21 +401,50 @@
           {/each}
         </div>
 
+        <!-- v2.2 批量栏 -->
+        <div class="bulk-bar">
+          <button class="bulk btn-approve" onclick={bulkApproveCleaning} title="全部显式接受(等同默认,锁定决策)">✓ 全接受</button>
+          <button class="bulk btn-reject" onclick={bulkRejectCleaning} title="全部拒绝(对应行不再删除)">✗ 全拒绝</button>
+          <button class="bulk btn-reset" onclick={bulkClearCleaning}>重置</button>
+        </div>
+
         <ul class="list">
           {#each cleaningItems.slice(0, cleaningVisible) as c, idx (idx)}
             {@const p = preview(c.span)}
+            {@const d = getCleaningDecision(c.span)}
             <li>
-              <button
-                class="item item-cleaning"
+              <div
+                class="item item-cleaning has-decision-actions"
                 class:active={idx === cleaningSelected}
+                class:dec-approved={d === "approved"}
+                class:dec-rejected={d === "rejected"}
+                role="button"
+                tabindex="0"
                 onclick={() => jumpCleaning(idx)}
+                onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); jumpCleaning(idx); }}}
               >
                 <span class="kind kind-cleaning">{KIND_LABEL[c.kind] ?? c.kind}</span>
                 <span class="ctx">
                   <span class="dim">{p.before}</span><mark class="mk-cleaning">{p.target}</mark><span class="dim">{p.after}</span>
                 </span>
                 <span class="offset">[{c.span.start}–{c.span.end}]</span>
-              </button>
+                <span class="dec-actions" role="presentation" onclick={(e) => e.stopPropagation()}>
+                  <button
+                    class="dec-btn dec-approve"
+                    class:on={d === "approved"}
+                    onclick={() => toggleCleaningDecision(c.span, "approved")}
+                    title="确认要删除(显式锁定,= 默认)"
+                    type="button"
+                  >✓</button>
+                  <button
+                    class="dec-btn dec-reject"
+                    class:on={d === "rejected"}
+                    onclick={() => toggleCleaningDecision(c.span, "rejected")}
+                    title="拒绝删除,保留该 span"
+                    type="button"
+                  >✗</button>
+                </span>
+              </div>
             </li>
           {/each}
         </ul>
@@ -377,19 +483,48 @@
         {#if wmFiltered.length === 0}
           <p class="hint">当前 tab 下无数据。</p>
         {:else}
+          <!-- v2.2 批量栏 -->
+          <div class="bulk-bar">
+            <button class="bulk btn-approve" onclick={bulkApproveWm} title="auto 锁定删 / suspect 升级删">✓ 全接受</button>
+            <button class="bulk btn-reject" onclick={bulkRejectWm} title="auto 取消删 / suspect 锁定保留">✗ 全拒绝</button>
+            <button class="bulk btn-reset" onclick={bulkClearWm}>重置</button>
+          </div>
+
           <ul class="list">
             {#each wmFiltered.slice(0, wmVisible) as w, idx (`${w.span.start}-${w.span.end}-${idx}`)}
               {@const p = preview(w.span)}
+              {@const d = getWmDecision(w.span)}
               <li>
-                <button
-                  class="item item-watermark"
+                <div
+                  class="item item-watermark has-decision-actions"
                   class:active={idx === wmSelected}
+                  class:dec-approved={d === "approved"}
+                  class:dec-rejected={d === "rejected"}
+                  role="button"
+                  tabindex="0"
                   onclick={() => jumpWm(idx)}
+                  onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); jumpWm(idx); }}}
                 >
                   <span class="verdict-row">
                     <span class="verdict verdict-{w.verdict}">{w.verdict === "auto" ? "自动" : "灰区"}</span>
                     <span class="score">分 {formatScore(w.score)}</span>
                     <span class="offset">[{w.span.start}–{w.span.end}]</span>
+                    <span class="dec-actions" role="presentation" onclick={(e) => e.stopPropagation()}>
+                      <button
+                        class="dec-btn dec-approve"
+                        class:on={d === "approved"}
+                        onclick={() => toggleWmDecision(w.span, "approved")}
+                        title={w.verdict === "auto" ? "确认删(锁定默认)" : "升级:从灰区扣除该行"}
+                        type="button"
+                      >✓</button>
+                      <button
+                        class="dec-btn dec-reject"
+                        class:on={d === "rejected"}
+                        onclick={() => toggleWmDecision(w.span, "rejected")}
+                        title={w.verdict === "auto" ? "拒绝删:auto 行将保留在 EPUB" : "锁定保留(默认就是保留)"}
+                        type="button"
+                      >✗</button>
+                    </span>
                   </span>
                   <span class="ctx">
                     <span class="dim">{p.before}</span><mark class="mk-{w.verdict}">{p.target}</mark><span class="dim">{p.after}</span>
@@ -403,7 +538,7 @@
                       </div>
                     {/each}
                   </div>
-                </button>
+                </div>
               </li>
             {/each}
           </ul>
@@ -684,4 +819,70 @@
   .reanalyze.hot:hover { background: #1858c2; }
   .reanalyze:disabled { cursor: not-allowed; opacity: 0.7; }
   .err { color: #c62828; font-size: 10px; }
+
+  /* v2.2 批量栏 + 决策按钮 */
+  .bulk-bar {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 8px;
+  }
+  .bulk {
+    background: #fff;
+    border: 1px solid #cbd2d9;
+    border-radius: 3px;
+    padding: 2px 8px;
+    font-size: 10px;
+    color: #52606d;
+    cursor: pointer;
+  }
+  .bulk:hover { background: #eef1f5; }
+  .bulk.btn-approve { color: #2e7d32; border-color: #c8e6c9; }
+  .bulk.btn-approve:hover { background: #e8f5e9; }
+  .bulk.btn-reject { color: #c62828; border-color: #ffcdd2; }
+  .bulk.btn-reject:hover { background: #ffebee; }
+
+  /* 卡片决策态:左侧色带 + 整体透明度 */
+  .item.dec-approved {
+    box-shadow: inset 3px 0 0 #43a047;
+  }
+  .item.dec-rejected {
+    box-shadow: inset 3px 0 0 #9aa5b1;
+    opacity: 0.55;
+  }
+
+  /* 决策按钮组 */
+  .dec-actions {
+    display: inline-flex;
+    gap: 2px;
+    margin-left: 4px;
+  }
+  .item-watermark .dec-actions {
+    margin-left: auto;
+  }
+  .dec-btn {
+    background: #fff;
+    border: 1px solid #cbd2d9;
+    border-radius: 3px;
+    width: 20px;
+    height: 18px;
+    padding: 0;
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+    color: #9aa5b1;
+    font-weight: 700;
+  }
+  .dec-btn:hover { background: #eef1f5; }
+  .dec-btn.dec-approve.on {
+    background: #43a047;
+    border-color: #43a047;
+    color: #fff;
+  }
+  .dec-btn.dec-reject.on {
+    background: #c62828;
+    border-color: #c62828;
+    color: #fff;
+  }
+  /* 让支持决策的"卡片 div"看起来仍像可点按钮 */
+  .item.has-decision-actions { user-select: none; }
 </style>

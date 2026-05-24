@@ -49,12 +49,16 @@ export const loadAndAnalyze = (
     watermarkConfig: watermarkConfig ?? null,
   });
 
-export const buildEpub = ({ outputPath, title, author, kepubifyPath }) =>
+/// 构建 EPUB。
+/// `decisions`(v2.2 新增,可选):用户决策列表,形状 `[{ span:{start,end}, scope, verdict }]`。
+///   后端调用 `apply_user_decisions` 重组 cleaning 后再走 EPUB 构建。
+export const buildEpub = ({ outputPath, title, author, kepubifyPath, decisions }) =>
   invoke("build_epub", {
     outputPath,
     title,
     author,
     kepubifyPath: kepubifyPath ?? null,
+    decisions: decisions ?? null,
   });
 
 export const cancelTask = (taskId) => invoke("cancel_task", { taskId });

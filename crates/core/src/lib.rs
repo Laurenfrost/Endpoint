@@ -445,4 +445,143 @@ mod tests {
             "应当出现镜像后的 watermark_* kind"
         );
     }
+
+    // ============================================================================
+    // v2.2 端到端:用户决策 → cleaning 重组 → paragraphs 重物化 → EPUB 内容变化
+    // ============================================================================
+
+    use crate::domain::{DecisionScope, DecisionVerdict, UserDecision};
+
+    /// reject 一条 auto 水印:该行应当从 paragraphs 中**回来**(EPUB 不再扣除)。
+    #[test]
+    fn rejecting_auto_watermark_keeps_line_in_paragraphs() {
+        // 构造一个会产生 auto 水印的样本(keyword + repetition)
+        let watermark_line = "本文首发于 https://example.com/novel 更新最快";
+        let mut text = String::from("第一章 起\n正文一段较长内容。\n");
+        for _ in 0..50 {
+            text.push_str(watermark_line);
+            text.push('\n');
+        }
+        text.push_str("章节末尾。\n");
+
+        let pipeline = run_pipeline(
+            text.as_bytes(),
+            Metadata::new("测试", "作者"),
+            &ConvertOptions::default(),
+            &NoopSink,
+        )
+        .unwrap();
+
+        // 拿一条 auto 镜像的 span(从 cleaning 里挑 watermark_* kind)
+        let auto_span = pipeline
+            .cleaning
+            .iter()
+            .find(|c| c.kind.is_watermark())
+            .map(|c| c.span)
+            .expect("应有 auto 镜像");
+
+        // 默认行为:该 span 应当**不在** paragraphs(被扣除了)
+        let containing_text = &pipeline.source_text[auto_span.start..auto_span.end];
+        let para_contains_default = collect_paragraph_texts(&pipeline)
+            .iter()
+            .any(|p| p.contains(containing_text));
+        assert!(
+            !para_contains_default,
+            "默认下 auto 水印应当不在 paragraphs"
+        );
+
+        // 应用 reject 决策:重算 cleaning + 重 materialize → paragraphs 应再次包含该行
+        let decisions = vec![UserDecision {
+            span: auto_span,
+            scope: DecisionScope::Watermark,
+            verdict: DecisionVerdict::Rejected,
+        }];
+        let new_cleaning =
+            watermark::apply_user_decisions(&pipeline.cleaning, &pipeline.watermark, &decisions);
+        let mut book2 = pipeline.book.clone();
+        chapter::materialize_paragraphs(&mut book2, &pipeline.source_text, &new_cleaning);
+        let para_contains_after_reject = collect_paragraph_texts_from_book(&book2)
+            .iter()
+            .any(|p| p.contains(containing_text));
+        assert!(
+            para_contains_after_reject,
+            "reject 后 auto 水印应保留在 paragraphs(用户拒绝扣除)"
+        );
+    }
+
+    /// approve 一条 suspect 水印:该行应当**消失**于 paragraphs(EPUB 删)。
+    #[test]
+    fn approving_suspect_watermark_removes_line_from_paragraphs() {
+        // 构造一个会产生 suspect 但不到 auto 的样本(keyword + non_cjk,无 repetition)
+        let suspect_line = "请访问 https://novel.example.com 阅读最新章节";
+        let text = format!(
+            "第一章 起\n正文一段较长内容。\n{}\n正文二段较长内容。\n",
+            suspect_line
+        );
+
+        let pipeline = run_pipeline(
+            text.as_bytes(),
+            Metadata::new("测试", "作者"),
+            &ConvertOptions::default(),
+            &NoopSink,
+        )
+        .unwrap();
+
+        // 找到那条 suspect
+        let suspect = pipeline
+            .watermark
+            .iter()
+            .find(|w| w.verdict == WatermarkVerdict::Suspect)
+            .expect("应有 suspect");
+
+        // 默认行为:该 span 应在 paragraphs(suspect 不扣除)
+        let containing = &pipeline.source_text[suspect.span.start..suspect.span.end];
+        let para_contains_default = collect_paragraph_texts(&pipeline)
+            .iter()
+            .any(|p| p.contains(containing));
+        assert!(para_contains_default, "默认下 suspect 应保留在 paragraphs");
+
+        // 应用 approve:升级到 auto 等效 → paragraphs 应当不含
+        let decisions = vec![UserDecision {
+            span: suspect.span,
+            scope: DecisionScope::Watermark,
+            verdict: DecisionVerdict::Approved,
+        }];
+        let new_cleaning =
+            watermark::apply_user_decisions(&pipeline.cleaning, &pipeline.watermark, &decisions);
+        let mut book2 = pipeline.book.clone();
+        chapter::materialize_paragraphs(&mut book2, &pipeline.source_text, &new_cleaning);
+        let para_contains_after_approve = collect_paragraph_texts_from_book(&book2)
+            .iter()
+            .any(|p| p.contains(containing));
+        assert!(
+            !para_contains_after_approve,
+            "approve suspect 后 paragraphs 不应含该行"
+        );
+    }
+
+    // —— 测试 helper:把所有 paragraphs 收集成 Vec<String> ——
+    fn collect_paragraph_texts(p: &PipelineOutput) -> Vec<String> {
+        collect_paragraph_texts_from_book(&p.book)
+    }
+    fn collect_paragraph_texts_from_book(b: &crate::domain::Book) -> Vec<String> {
+        let mut all = Vec::new();
+        for e in &b.entries {
+            match e {
+                BookEntry::Chapter(c) => {
+                    for para in &c.paragraphs {
+                        all.push(para.as_str().to_string());
+                    }
+                }
+                BookEntry::Volume(v) => {
+                    for ch in &v.chapters {
+                        for para in &ch.paragraphs {
+                            all.push(para.as_str().to_string());
+                        }
+                    }
+                }
+            }
+        }
+        all
+    }
 }

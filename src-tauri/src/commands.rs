@@ -210,6 +210,11 @@ pub async fn load_and_analyze(
 ///
 /// `title` / `author` 覆盖缓存中元数据(`load_and_analyze` 时是占位)。
 /// 调用前必须先 `load_and_analyze`,否则返回错误。
+///
+/// **阶段三 v2.2 新增** `decisions`:用户对自动检测结果的覆盖决策列表(可选)。
+/// 若提供,会在构建 EPUB 前调用 [`watermark::apply_user_decisions`] 重组 cleaning
+/// + 重 materialize paragraphs,从而让"用户拒绝的清洗"留在 EPUB、"用户接受的 suspect"
+/// 从 EPUB 删掉。决策仅本次调用有效,不持久化。
 #[tauri::command]
 pub async fn build_epub(
     app: AppHandle,
@@ -218,7 +223,21 @@ pub async fn build_epub(
     title: String,
     author: String,
     kepubify_path: Option<String>,
+    decisions: Option<Vec<serde_json::Value>>,
 ) -> Result<String, String> {
+    // 反序列化决策列表(失败显式报错,不静默)
+    let decisions_typed: Vec<endpoint_core::domain::UserDecision> = match decisions {
+        Some(list) => list
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| {
+                serde_json::from_value(v)
+                    .map_err(|e| format!("decisions[{i}] 反序列化失败: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        None => Vec::new(),
+    };
+
     // 把 pipeline 拷贝出来(改 metadata 不影响缓存原件),交给 blocking 闭包。
     let pipeline_for_build: PipelineOutput = {
         let guard = state
@@ -247,8 +266,26 @@ pub async fn build_epub(
             app: app_for_sink,
             task_id: task_id_for_blocking,
         };
+
+        // v2.2:若有决策,叠加到 cleaning + 重新 materialize paragraphs。
+        // 没决策走老路径(等价于"全部保持默认"),性能与 v2.1 相同。
+        let mut pipeline = pipeline_for_build;
+        if !decisions_typed.is_empty() {
+            let new_cleaning = endpoint_core::watermark::apply_user_decisions(
+                &pipeline.cleaning,
+                &pipeline.watermark,
+                &decisions_typed,
+            );
+            pipeline.cleaning = new_cleaning;
+            endpoint_core::chapter::materialize_paragraphs(
+                &mut pipeline.book,
+                &pipeline.source_text,
+                &pipeline.cleaning,
+            );
+        }
+
         build_epub_from(
-            &pipeline_for_build,
+            &pipeline,
             &output_owned,
             kepubify_owned.as_deref(),
             &sink,

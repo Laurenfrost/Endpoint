@@ -25,8 +25,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    Book, BookEntry, CleaningAnnotation, CleaningKind, Span, WatermarkAnnotation, WatermarkSignal,
-    WatermarkSignalKind, WatermarkVerdict,
+    Book, BookEntry, CleaningAnnotation, CleaningKind, DecisionScope, DecisionVerdict, Span,
+    UserDecision, WatermarkAnnotation, WatermarkSignal, WatermarkSignalKind, WatermarkVerdict,
 };
 use crate::rules::{RuleKind, RuleSet};
 
@@ -332,20 +332,102 @@ pub fn merge_auto_into_cleaning(
             replacement: None,
         });
     }
+    sort_and_merge_overlaps(combined)
+}
 
-    // 排序:start 升序,start 相同 end 升序——保证合并扫描可线性进行
+/// **阶段三 v2.2 新增**:把用户决策叠加到自动产物上,产出最终 cleaning。
+///
+/// 输入 `cleaning` 应当是 [`merge_auto_into_cleaning`] 的输出(已含 auto 镜像)。
+/// 输入 `watermarks` 是原 `PipelineOutput.watermark` 全集,用于查找 approved suspect 的
+/// signals(决定镜像变体 kind)。
+///
+/// 三类决策真正改变输出:
+/// - `(Cleaning, Rejected)`:从 cleaning 移除该 span(EPUB 不删该行)
+/// - `(Watermark, Rejected)`:从 cleaning 镜像移除该 span(若曾被 auto 镜像)
+/// - `(Watermark, Approved)`:若 span 在 watermark 列表中 verdict==Suspect,
+///   则注入 cleaning(以对应 `Watermark*` kind 形式)→ EPUB 删该行
+///
+/// 决策与 `pipeline.cleaning` 中 span 严格按 `(start, end)` 精确匹配——前端必须保证
+/// 用 IPC 返回的 span 原样回传,不做合并裁剪。
+///
+/// 详见 `docs/stage3-v2-design.md` 第三节 3.3。
+pub fn apply_user_decisions(
+    cleaning: &[CleaningAnnotation],
+    watermarks: &[WatermarkAnnotation],
+    decisions: &[UserDecision],
+) -> Vec<CleaningAnnotation> {
+    // 按 (start, end) 索引三类逆向决策
+    let mut cleaning_rejected: HashSet<(usize, usize)> = HashSet::new();
+    let mut wm_rejected: HashSet<(usize, usize)> = HashSet::new();
+    let mut wm_approved: HashSet<(usize, usize)> = HashSet::new();
+    for d in decisions {
+        let key = (d.span.start, d.span.end);
+        match (d.scope, d.verdict) {
+            (DecisionScope::Cleaning, DecisionVerdict::Rejected) => {
+                cleaning_rejected.insert(key);
+            }
+            (DecisionScope::Watermark, DecisionVerdict::Rejected) => {
+                wm_rejected.insert(key);
+            }
+            (DecisionScope::Watermark, DecisionVerdict::Approved) => {
+                wm_approved.insert(key);
+            }
+            // 其余 3 态决策与默认一致,不需特殊处理:
+            //  - (Cleaning, Approved):默认就是删 → no-op
+            //  - 不可能 (Cleaning, ...) 同时被 rejected 与 approved,
+            //    若前端传了冲突我们以 rejected 为准(rejected 是真正改默认的)
+            _ => {}
+        }
+    }
+
+    // 1. 过滤:rejected 项移除
+    let mut kept: Vec<CleaningAnnotation> = cleaning
+        .iter()
+        .filter(|c| {
+            let key = (c.span.start, c.span.end);
+            if c.kind.is_watermark() {
+                // watermark 镜像:rejected 移除
+                !wm_rejected.contains(&key)
+            } else {
+                // 普通 cleaning:rejected 移除
+                !cleaning_rejected.contains(&key)
+            }
+        })
+        .cloned()
+        .collect();
+
+    // 2. 注入:approved suspect
+    for w in watermarks {
+        if w.verdict != WatermarkVerdict::Suspect {
+            continue;
+        }
+        let key = (w.span.start, w.span.end);
+        if !wm_approved.contains(&key) {
+            continue;
+        }
+        kept.push(CleaningAnnotation {
+            span: w.span,
+            kind: signals_to_cleaning_kind(&w.signals),
+            replacement: None,
+        });
+    }
+
+    sort_and_merge_overlaps(kept)
+}
+
+/// 共用 helper:按 `(start, end)` 排序后,线性扫描合并重叠区间。
+///
+/// 重叠处理与第二节"镜像不变式 #3"一致:并集 span + 优先级 kind。
+/// 同时被 [`merge_auto_into_cleaning`] 与 [`apply_user_decisions`] 调用。
+fn sort_and_merge_overlaps(mut combined: Vec<CleaningAnnotation>) -> Vec<CleaningAnnotation> {
     combined.sort_by_key(|a| (a.span.start, a.span.end));
 
-    // 线性合并重叠区间
     let mut out: Vec<CleaningAnnotation> = Vec::with_capacity(combined.len());
     for ann in combined {
         if let Some(last) = out.last_mut() {
             if ann.span.start < last.span.end {
-                // 重叠:取并集 + 优先级 kind
                 let new_end = last.span.end.max(ann.span.end);
                 let new_kind = pick_priority_kind(last.kind, ann.kind);
-                // replacement 跟随 kind 来源:若 new_kind 来自 ann 则取 ann.replacement,
-                // 否则保留 last.replacement(已存在)。kind 相等时优先保留 last(早出现者)。
                 let new_replacement = if new_kind == ann.kind && new_kind != last.kind {
                     ann.replacement
                 } else {
@@ -1249,5 +1331,156 @@ mod tests {
         }
         // 应有 4 条:[0,3) / [50,60)(合并) / [100,120) / [200,220)
         assert_eq!(out.len(), 4);
+    }
+
+    // ============================================================================
+    // v2.2:apply_user_decisions 测试
+    // ============================================================================
+
+    use crate::domain::{DecisionScope, DecisionVerdict, UserDecision};
+
+    fn dec(span: Span, scope: DecisionScope, verdict: DecisionVerdict) -> UserDecision {
+        UserDecision { span, scope, verdict }
+    }
+
+    /// 空 decisions → 输出与输入完全一致。
+    #[test]
+    fn apply_decisions_empty_is_identity() {
+        let cleaning = vec![
+            CleaningAnnotation { span: Span::new(0, 3), kind: CleaningKind::TrailingWhitespace, replacement: None },
+            CleaningAnnotation { span: Span::new(50, 60), kind: CleaningKind::WatermarkKeyword, replacement: None },
+        ];
+        let wms = vec![make_auto(Span::new(50, 60), WatermarkSignalKind::KeywordRegex)];
+        let out = apply_user_decisions(&cleaning, &wms, &[]);
+        assert_eq!(out, cleaning);
+    }
+
+    /// cleaning rejected:span 应从输出移除(EPUB 不删该行)。
+    #[test]
+    fn apply_decisions_cleaning_rejected_removes_span() {
+        let cleaning = vec![
+            CleaningAnnotation { span: Span::new(0, 3), kind: CleaningKind::TrailingWhitespace, replacement: None },
+            CleaningAnnotation { span: Span::new(10, 15), kind: CleaningKind::BlankLineCompression, replacement: Some("\n\n".into()) },
+        ];
+        let decisions = vec![dec(Span::new(0, 3), DecisionScope::Cleaning, DecisionVerdict::Rejected)];
+        let out = apply_user_decisions(&cleaning, &[], &decisions);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].span, Span::new(10, 15));
+    }
+
+    /// watermark auto rejected:从 cleaning 镜像移除该 span。
+    #[test]
+    fn apply_decisions_watermark_auto_rejected_removes_mirror() {
+        // 已含 auto 镜像的 cleaning
+        let cleaning = vec![
+            CleaningAnnotation { span: Span::new(0, 3), kind: CleaningKind::TrailingWhitespace, replacement: None },
+            CleaningAnnotation { span: Span::new(50, 60), kind: CleaningKind::WatermarkKeyword, replacement: None },
+            CleaningAnnotation { span: Span::new(100, 110), kind: CleaningKind::WatermarkRepetition, replacement: None },
+        ];
+        let wms = vec![
+            make_auto(Span::new(50, 60), WatermarkSignalKind::KeywordRegex),
+            make_auto(Span::new(100, 110), WatermarkSignalKind::Repetition),
+        ];
+        let decisions = vec![dec(Span::new(50, 60), DecisionScope::Watermark, DecisionVerdict::Rejected)];
+        let out = apply_user_decisions(&cleaning, &wms, &decisions);
+        assert_eq!(out.len(), 2);
+        // [50,60) 镜像被移除;[0,3) 与 [100,110) 保留
+        assert_eq!(out[0].span, Span::new(0, 3));
+        assert_eq!(out[1].span, Span::new(100, 110));
+    }
+
+    /// watermark suspect approved:span 注入 cleaning(等效升 auto → EPUB 删)。
+    #[test]
+    fn apply_decisions_suspect_approved_injects_into_cleaning() {
+        let cleaning: Vec<CleaningAnnotation> = Vec::new(); // 假设之前没有 cleaning
+        let wms = vec![WatermarkAnnotation {
+            span: Span::new(200, 220),
+            verdict: WatermarkVerdict::Suspect,
+            score: 0.56,
+            signals: vec![WatermarkSignal {
+                kind: WatermarkSignalKind::KeywordRegex,
+                score: 1.0,
+                detail: None,
+            }],
+        }];
+        let decisions = vec![dec(Span::new(200, 220), DecisionScope::Watermark, DecisionVerdict::Approved)];
+        let out = apply_user_decisions(&cleaning, &wms, &decisions);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].span, Span::new(200, 220));
+        assert_eq!(out[0].kind, CleaningKind::WatermarkKeyword);
+    }
+
+    /// cleaning approved 是 no-op(默认就是删除,显式锁定不改输出)。
+    #[test]
+    fn apply_decisions_cleaning_approved_is_noop() {
+        let cleaning = vec![CleaningAnnotation {
+            span: Span::new(0, 3),
+            kind: CleaningKind::TrailingWhitespace,
+            replacement: None,
+        }];
+        let decisions = vec![dec(Span::new(0, 3), DecisionScope::Cleaning, DecisionVerdict::Approved)];
+        let out = apply_user_decisions(&cleaning, &[], &decisions);
+        assert_eq!(out, cleaning, "cleaning approved 应当 = no-op,默认行为不变");
+    }
+
+    /// suspect rejected 是 no-op(默认就是保留)。
+    #[test]
+    fn apply_decisions_suspect_rejected_is_noop() {
+        let cleaning: Vec<CleaningAnnotation> = Vec::new();
+        let wms = vec![WatermarkAnnotation {
+            span: Span::new(200, 220),
+            verdict: WatermarkVerdict::Suspect,
+            score: 0.50,
+            signals: vec![WatermarkSignal {
+                kind: WatermarkSignalKind::KeywordRegex,
+                score: 1.0,
+                detail: None,
+            }],
+        }];
+        let decisions = vec![dec(Span::new(200, 220), DecisionScope::Watermark, DecisionVerdict::Rejected)];
+        let out = apply_user_decisions(&cleaning, &wms, &decisions);
+        assert!(out.is_empty(), "suspect rejected 应当 = no-op,suspect 本就不在 cleaning");
+    }
+
+    /// 不存在 span 的决策应被忽略(不 panic,不改输出)。
+    #[test]
+    fn apply_decisions_unmatched_span_is_ignored() {
+        let cleaning = vec![CleaningAnnotation {
+            span: Span::new(0, 3),
+            kind: CleaningKind::TrailingWhitespace,
+            replacement: None,
+        }];
+        let decisions = vec![
+            dec(Span::new(999, 1000), DecisionScope::Cleaning, DecisionVerdict::Rejected),
+            dec(Span::new(500, 600), DecisionScope::Watermark, DecisionVerdict::Rejected),
+        ];
+        let out = apply_user_decisions(&cleaning, &[], &decisions);
+        assert_eq!(out, cleaning);
+    }
+
+    /// approved suspect 与既有 cleaning 重叠时,按合并优先级处理(原 cleaning > watermark)。
+    #[test]
+    fn apply_decisions_approved_suspect_merges_with_existing() {
+        let cleaning = vec![CleaningAnnotation {
+            span: Span::new(195, 205),
+            kind: CleaningKind::TrailingWhitespace,
+            replacement: None,
+        }];
+        let wms = vec![WatermarkAnnotation {
+            span: Span::new(200, 220),
+            verdict: WatermarkVerdict::Suspect,
+            score: 0.50,
+            signals: vec![WatermarkSignal {
+                kind: WatermarkSignalKind::KeywordRegex,
+                score: 1.0,
+                detail: None,
+            }],
+        }];
+        let decisions = vec![dec(Span::new(200, 220), DecisionScope::Watermark, DecisionVerdict::Approved)];
+        let out = apply_user_decisions(&cleaning, &wms, &decisions);
+        assert_eq!(out.len(), 1);
+        // 并集 [195, 220);kind 应当是 TrailingWhitespace(原 cleaning 优先级 > watermark)
+        assert_eq!(out[0].span, Span::new(195, 220));
+        assert_eq!(out[0].kind, CleaningKind::TrailingWhitespace);
     }
 }

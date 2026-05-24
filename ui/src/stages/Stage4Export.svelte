@@ -4,6 +4,7 @@
   import { pipeline } from "../stores/pipeline.svelte.js";
   import { progress, setBusy } from "../stores/progress.svelte.js";
   import { pickOutputFile, pickExecutableFile, buildEpub } from "../ipc.js";
+  import { serializeForIpc, decisionCount } from "../stores/decisions.svelte.js";
 
   let outputPath = $state("");
   let title = $state("");
@@ -44,11 +45,14 @@
     result = "";
     setBusy(true);
     try {
+      // v2.2:把用户决策序列化后随命令带给后端,后端用 apply_user_decisions 重组 cleaning
+      const decisions = serializeForIpc();
       const finalPath = await buildEpub({
         outputPath,
         title,
         author,
         kepubifyPath: kepubifyPath || null,
+        decisions: decisions.length > 0 ? decisions : null,
       });
       result = finalPath;
     } catch (e) {
@@ -99,6 +103,9 @@
     <button class="primary" onclick={onBuild} disabled={progress.busy}>
       {progress.busy ? "生成中..." : "生成 EPUB"}
     </button>
+    {#if decisionCount() > 0}
+      <p class="hint" style="margin-top: 6px;">将随生成应用 <strong>{decisionCount()}</strong> 条用户决策(阶段 2 中的接受 / 拒绝)。</p>
+    {/if}
 
     {#if error}<div class="error">{error}</div>{/if}
     {#if result}<div class="ok">✓ {result}</div>{/if}
