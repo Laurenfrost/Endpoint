@@ -230,10 +230,21 @@
     white-space: pre-wrap;
     word-break: break-all;
   }
-  /* 高亮 className 由 stage 组件指定;在此声明 stage 2 / 3 用到的颜色。 */
+  /* 高亮 className 由 stage 组件指定;在此声明 stage 2 / 3 用到的颜色。
+     色板:红=cleaning(格式整理)/ 橙=auto 水印 / 黄=suspect 水印 / 蓝=章 / 绿=卷 */
   :global(.hl-cleaning) {
     background: rgba(220, 53, 69, 0.22);
     border-bottom: 1px solid rgba(220, 53, 69, 0.7);
+    border-radius: 2px;
+  }
+  :global(.hl-watermark-auto) {
+    background: rgba(255, 140, 0, 0.22);
+    border-bottom: 1px solid rgba(255, 140, 0, 0.85);
+    border-radius: 2px;
+  }
+  :global(.hl-watermark-suspect) {
+    background: rgba(245, 196, 0, 0.28);
+    border-bottom: 1px dashed rgba(180, 142, 0, 0.85);
     border-radius: 2px;
   }
   :global(.hl-heading) {

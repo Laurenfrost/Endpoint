@@ -46,6 +46,7 @@ export const cancelTask = (taskId) => invoke("cancel_task", { taskId });
 
 /// 监听后台进度事件。payload 形状:
 ///   { task_id, stage, percent, detail }
-///   stage ∈ "decoding" | "cleaning" | "chapter" | "epub" | "kepubify"
+///   stage ∈ "decoding" | "cleaning" | "chapter" | "watermark" | "epub" | "kepubify"
+///   (watermark 为阶段三 3.0 起新增。)
 export const onProgress = (handler) =>
   listen("endpoint://progress", (evt) => handler(evt.payload));
