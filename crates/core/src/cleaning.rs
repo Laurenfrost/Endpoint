@@ -55,13 +55,16 @@ pub struct CleaningConfig {
 }
 
 impl Default for CleaningConfig {
+    /// **v2 默认全关**(决策:开箱即用不动用户文本)。用户主动在 Stage2 顶部
+    /// "清洗策略"面板勾选后,改动并点"重新分析"才生效。
+    /// 智能默认不再"猜测用户想要哪些清洗",而是把决策权完全交给用户。
     fn default() -> Self {
         Self {
-            blank_line_compression: true,
+            blank_line_compression: false,
             leading_fullwidth_space: false,
-            inline_fullwidth_space: true,
-            control_char: true,
-            trailing_whitespace: true,
+            inline_fullwidth_space: false,
+            control_char: false,
+            trailing_whitespace: false,
         }
     }
 }
@@ -289,13 +292,32 @@ fn dedup_contained(anns: &mut Vec<CleaningAnnotation>) {
 mod tests {
     use super::*;
 
-    /// 测试用配置:默认 + 段首全角强制打开。便于直观验证旧 v1 行为(对应大多数旧测试)。
-    fn cfg_with_leading() -> CleaningConfig {
+    /// v2 起 `CleaningConfig::default()` 全关——这意味着 `analyze(text, &default)`
+    /// 永远返回空。本测试模块大量旧测试是验证"某个分支检测到了什么",
+    /// 因此需要一个"全开"的配置 helper。
+    fn cfg_all_on() -> CleaningConfig {
+        CleaningConfig {
+            blank_line_compression: true,
+            leading_fullwidth_space: true,
+            inline_fullwidth_space: true,
+            control_char: true,
+            trailing_whitespace: true,
+        }
+    }
+
+    /// 测试用配置:全关 + 段首全角强制打开。某些测试只想看 leading 行为不受其它干扰。
+    fn cfg_with_leading_only() -> CleaningConfig {
         let mut c = CleaningConfig::default();
         c.leading_fullwidth_space = true;
         c
     }
 
+    /// 跑全开配置——大多数旧测试用此 helper。
+    fn analyze_all_on(text: &str) -> Vec<CleaningAnnotation> {
+        analyze(text, &cfg_all_on())
+    }
+
+    /// 跑全关默认配置——空结果 / 测试"默认不动"路径用。
     fn analyze_default(text: &str) -> Vec<CleaningAnnotation> {
         analyze(text, &CleaningConfig::default())
     }
@@ -309,7 +331,7 @@ mod tests {
     #[test]
     fn detects_trailing_whitespace() {
         let text = "正文1   \n正文2\t\t\n正文3\u{3000}\n";
-        let anns = analyze_default(text);
+        let anns = analyze_all_on(text);
         assert_eq!(anns.len(), 3);
         for a in &anns {
             assert_eq!(a.kind, CleaningKind::TrailingWhitespace);
@@ -323,7 +345,7 @@ mod tests {
     #[test]
     fn trailing_whitespace_covers_extended_charset() {
         let text = "正文1\r\n正文2\u{00A0}\n正文3\u{200B}\u{FEFF}\n";
-        let anns = analyze_default(text);
+        let anns = analyze_all_on(text);
         assert_eq!(anns.len(), 3);
         for a in &anns {
             assert_eq!(a.kind, CleaningKind::TrailingWhitespace);
@@ -341,7 +363,7 @@ mod tests {
             anns_default
         );
 
-        let anns_explicit = analyze(text, &cfg_with_leading());
+        let anns_explicit = analyze(text, &cfg_with_leading_only());
         assert_eq!(anns_explicit.len(), 1);
         assert_eq!(anns_explicit[0].kind, CleaningKind::LeadingFullwidthSpace);
         assert_eq!(
@@ -355,7 +377,7 @@ mod tests {
     #[test]
     fn detects_inline_fullwidth_space() {
         let text = "前文\u{3000}\u{3000}后文\n";
-        let anns = analyze_default(text);
+        let anns = analyze_all_on(text);
         assert_eq!(anns.len(), 1);
         assert_eq!(anns[0].kind, CleaningKind::InlineFullwidthSpace);
         assert_eq!(
@@ -368,15 +390,15 @@ mod tests {
     fn single_inline_fullwidth_space_is_kept() {
         // 单个行内全角空格:不标(常被用作有意分隔)
         let text = "前文\u{3000}后文\n";
-        let anns = analyze_default(text);
+        let anns = analyze_all_on(text);
         assert!(anns.is_empty(), "单个行内全角不应触发 inline,实际 {:?}", anns);
     }
 
     #[test]
     fn leading_and_inline_can_coexist() {
-        // 段首 + 行内连续多个,需在 leading 启用时两条 annotation 各占一段
+        // 段首 + 行内连续多个,需要 leading 与 inline 都开
         let text = "\u{3000}\u{3000}前文\u{3000}\u{3000}后文\n";
-        let anns = analyze(text, &cfg_with_leading());
+        let anns = analyze_all_on(text);
         assert_eq!(anns.len(), 2);
         assert_eq!(anns[0].kind, CleaningKind::LeadingFullwidthSpace);
         assert_eq!(anns[1].kind, CleaningKind::InlineFullwidthSpace);
@@ -411,7 +433,7 @@ mod tests {
     fn strips_control_characters() {
         // 行中夹杂 \u{0001} \u{0007} \u{007F}
         let text = "前\u{0001}中\u{0007}后\u{007F}\n";
-        let anns = analyze_default(text);
+        let anns = analyze_all_on(text);
         assert_eq!(anns.len(), 3);
         for a in &anns {
             assert_eq!(a.kind, CleaningKind::ControlChar);
@@ -422,9 +444,9 @@ mod tests {
     fn preserves_tab_and_newline() {
         // \t 不应当被识别为控制字符;\n 作为换行符也不被剥离
         let text = "前\t中\n后\n";
-        let anns = analyze_default(text);
+        let anns = analyze_all_on(text);
         assert!(
-            anns.is_empty(),
+            anns.iter().all(|a| a.kind != CleaningKind::ControlChar),
             "\\t 与 \\n 不应触发 ControlChar,实际产出 {:?}",
             anns
         );
@@ -433,7 +455,7 @@ mod tests {
     #[test]
     fn compresses_blank_line_runs() {
         let text = "para A\n\n\n\npara B";
-        let anns = analyze_default(text);
+        let anns = analyze_all_on(text);
         assert_eq!(anns.len(), 1);
         assert_eq!(anns[0].kind, CleaningKind::BlankLineCompression);
         assert_eq!(anns[0].replacement.as_deref(), Some("\n\n"));
@@ -445,14 +467,14 @@ mod tests {
     fn does_not_compress_single_blank_line() {
         // 两个 \n(=一个空白行)是合法段落分隔,不动
         let text = "para A\n\npara B";
-        let anns = analyze_default(text);
+        let anns = analyze_all_on(text);
         assert!(anns.is_empty(), "{:?}", anns);
     }
 
     #[test]
     fn blank_lines_with_interior_whitespace_compress() {
         let text = "A\n  \n\t\n  \nB";
-        let anns = analyze_default(text);
+        let anns = analyze_all_on(text);
         // 整体匹配为一段空行压缩,内部含 4 个 \n
         assert!(anns
             .iter()
@@ -461,20 +483,22 @@ mod tests {
 
     #[test]
     fn apply_round_trip_full_example() {
-        // 验证 v2:默认配置下段首缩进保留 → cleaned 文本仍含段首全角
+        // v2:全开配置下,段首缩进被剥 + 行尾空白删 + 空行压缩 = 最干净输出
         let text = "\u{3000}\u{3000}第一章 起   \n\n\n\n  正文1\t\t\n";
-        let anns = analyze_default(text);
-        let cleaned = apply(text, &anns);
-        assert_eq!(cleaned, "\u{3000}\u{3000}第一章 起\n\n  正文1\n");
-    }
-
-    #[test]
-    fn apply_round_trip_with_leading_enabled() {
-        // 显式开启 leading_fullwidth_space → 段首被剥
-        let text = "\u{3000}\u{3000}第一章 起   \n\n\n\n  正文1\t\t\n";
-        let anns = analyze(text, &cfg_with_leading());
+        let anns = analyze_all_on(text);
         let cleaned = apply(text, &anns);
         assert_eq!(cleaned, "第一章 起\n\n  正文1\n");
+    }
+
+    /// 关键性的"默认行为"锁定:v2 默认全关时,apply 与原文完全一致——
+    /// 这是"智能默认不动用户文本"承诺的代码级锚点。
+    #[test]
+    fn default_config_yields_identity_apply() {
+        let text = "\u{3000}\u{3000}第一章 起   \n\n\n\n  正文1\t\t\n";
+        let anns = analyze_default(text);
+        assert!(anns.is_empty(), "默认全关应当产出空 anns,实际 {:?}", anns);
+        let cleaned = apply(text, &anns);
+        assert_eq!(cleaned, text, "默认全关时 apply 应当 = 原文");
     }
 
     #[test]
@@ -487,7 +511,7 @@ mod tests {
     #[test]
     fn annotations_are_sorted_and_non_overlapping() {
         let text = "\u{3000}前\u{0001}文   \n\n\n\n下一行\n";
-        let anns = analyze(text, &cfg_with_leading());
+        let anns = analyze_all_on(text);
         for w in anns.windows(2) {
             assert!(
                 w[0].span.end <= w[1].span.start,
@@ -501,10 +525,11 @@ mod tests {
     #[test]
     fn default_config_matches_documented_values() {
         let c = CleaningConfig::default();
-        assert!(c.blank_line_compression);
-        assert!(!c.leading_fullwidth_space, "v2 默认不删段首缩进");
-        assert!(c.inline_fullwidth_space);
-        assert!(c.control_char);
-        assert!(c.trailing_whitespace);
+        // v2 决策:全部默认关,智能默认 = "不动用户文本"
+        assert!(!c.blank_line_compression);
+        assert!(!c.leading_fullwidth_space);
+        assert!(!c.inline_fullwidth_space);
+        assert!(!c.control_char);
+        assert!(!c.trailing_whitespace);
     }
 }

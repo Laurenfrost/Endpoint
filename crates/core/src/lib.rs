@@ -348,8 +348,10 @@ mod tests {
     /// suspect 不进 cleaning;EPUB 输出不会自动扣除 suspect 行。
     #[test]
     fn suspect_only_does_not_alter_cleaning_or_paragraphs() {
-        // 一行 keyword 命中 → 单特征 fused 0.40 → suspect(不重复,所以不会升 auto)
-        let text = "第一章 起\n正文一。\n本文首发于纵横中文网。\n正文二。\n";
+        // v2:单 keyword 0.40 < 0.42 不再触发,需要双特征。
+        // 此 fixture 用"keyword + non_cjk"(含 URL 的中文行)→ fused ~0.56 → suspect。
+        // 不重复,所以不会升 auto。
+        let text = "第一章 起\n正文一段。\n本文首发于 https://example.com/novel 更新最快。\n正文二段。\n";
         let pipeline = run_pipeline(
             text.as_bytes(),
             Metadata::new("测试", "作者"),
@@ -364,7 +366,8 @@ mod tests {
                 .watermark
                 .iter()
                 .any(|w| w.verdict == WatermarkVerdict::Suspect),
-            "应当识别出 suspect 水印"
+            "应当识别出 suspect 水印,实际 watermark = {:?}",
+            pipeline.watermark
         );
         // cleaning 中应当**没有** watermark_* kind(suspect 不镜像)
         assert!(
@@ -374,7 +377,7 @@ mod tests {
         );
         // paragraphs 应当保留水印行
         let has_suspect_line = match &pipeline.book.entries[0] {
-            BookEntry::Chapter(c) => c.paragraphs.iter().any(|p| p.as_str().contains("纵横中文网")),
+            BookEntry::Chapter(c) => c.paragraphs.iter().any(|p| p.as_str().contains("example.com")),
             _ => false,
         };
         assert!(has_suspect_line, "suspect 行应保留在 paragraphs");
@@ -382,6 +385,9 @@ mod tests {
 
     /// run_pipeline 输出的 cleaning 始终按 span.start 升序、互不重叠
     /// (即使加入了 auto 水印镜像后)。
+    ///
+    /// v2:CleaningConfig::default() 全关 → 必须显式提供 cleaning 配置才能触发
+    /// TrailingWhitespace;watermark auto 不受影响(只看 watermark.enabled,默认 true)。
     #[test]
     fn pipeline_cleaning_stays_sorted_and_non_overlapping_after_mirror() {
         let watermark_line = "首发于纵横中文网,更新最快";
@@ -391,13 +397,23 @@ mod tests {
             text.push('\n');
             text.push_str(&format!("正文 {}\n", i));
         }
-        // 加些会触发 cleaning 的行尾空白(v2 默认开,稳定触发 TrailingWhitespace)
+        // 加些会触发 cleaning 的行尾空白(需要显式开 trailing_whitespace)
         text.push_str("有尾随空白的一行。   \n");
 
+        let opts = ConvertOptions {
+            cleaning: Some(cleaning::CleaningConfig {
+                blank_line_compression: false,
+                leading_fullwidth_space: false,
+                inline_fullwidth_space: false,
+                control_char: false,
+                trailing_whitespace: true, // 仅开启 trailing
+            }),
+            ..ConvertOptions::default()
+        };
         let pipeline = run_pipeline(
             text.as_bytes(),
             Metadata::new("测试", "作者"),
-            &ConvertOptions::default(),
+            &opts,
             &NoopSink,
         )
         .unwrap();

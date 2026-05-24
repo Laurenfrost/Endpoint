@@ -39,12 +39,13 @@
 
   // —— v2 清洗策略面板 ——
   // 默认值与后端 CleaningConfig::default() 严格对齐;改后 dirty=true → 亮"重新分析"。
+  // **v2 调整后:全 5 项默认关**——智能默认 = "不动用户文本",清洗策略改为用户主动开启。
   const CLEANING_DEFAULT = {
-    blank_line_compression: true,
-    leading_fullwidth_space: false, // v2 默认关:保留段首缩进
-    inline_fullwidth_space: true,
-    control_char: true,
-    trailing_whitespace: true,
+    blank_line_compression: false,
+    leading_fullwidth_space: false,
+    inline_fullwidth_space: false,
+    control_char: false,
+    trailing_whitespace: false,
   };
   let cfg = $state({ ...CLEANING_DEFAULT });
   let cleaningLastApplied = $state({ ...CLEANING_DEFAULT });
@@ -57,7 +58,7 @@
   // 默认值与后端 WatermarkConfig::default() 严格对齐;改后 dirty 同 cleaning 联动。
   const WM_DEFAULT = {
     auto_threshold: 0.70,
-    suspect_threshold: 0.35,
+    suspect_threshold: 0.42, // v2:从 0.35 上调,单特征(0.40)不再 ≥ suspect
     w_repeat: 0.40,
     w_non_cjk: 0.20,
     w_keyword: 0.40,
@@ -106,7 +107,7 @@
   // —— 水印阈值面板的字段元数据(label / step / kind) ——
   const WM_FIELDS = [
     { key: "auto_threshold", label: "auto 阈值", kind: "float", min: 0, max: 1, step: 0.05, hint: "≥ 此值自动删除(默认 0.70)" },
-    { key: "suspect_threshold", label: "suspect 阈值", kind: "float", min: 0, max: 1, step: 0.05, hint: "≥ 此值进灰区(默认 0.35)" },
+    { key: "suspect_threshold", label: "suspect 阈值", kind: "float", min: 0, max: 1, step: 0.01, hint: "≥ 此值进灰区(默认 0.42,单特征 0.40 不再触发)" },
     { key: "w_repeat", label: "行频权重", kind: "float", min: 0, max: 1, step: 0.05, hint: "默认 0.40" },
     { key: "w_non_cjk", label: "非中文权重", kind: "float", min: 0, max: 1, step: 0.05, hint: "默认 0.20" },
     { key: "w_keyword", label: "关键词权重", kind: "float", min: 0, max: 1, step: 0.05, hint: "默认 0.40" },

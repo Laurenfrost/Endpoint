@@ -61,7 +61,11 @@ impl Default for WatermarkConfig {
     fn default() -> Self {
         Self {
             auto_threshold: 0.70,
-            suspect_threshold: 0.35,
+            // v2:从 0.35 上调到 0.42——结合 w_repeat/w_keyword 都是 0.40,
+            // 让"单 keyword 命中"(0.40)与"单 repetition 命中"(0.40)**单独**
+            // 都不再产出 annotation,要求**至少两个独立特征**才进 suspect。
+            // 这与设计文档"误删比漏删更保守"+真机实测后用户反馈"500+ 候选只 2 个真"对齐。
+            suspect_threshold: 0.42,
             w_repeat: 0.40,
             w_non_cjk: 0.20,
             w_keyword: 0.40,
@@ -511,7 +515,11 @@ mod tests {
     fn default_config_uses_documented_thresholds() {
         let c = WatermarkConfig::default();
         assert!((c.auto_threshold - 0.70).abs() < f32::EPSILON);
-        assert!((c.suspect_threshold - 0.35).abs() < f32::EPSILON);
+        // v2:suspect 从 0.35 上调到 0.42(决策:单特征不再 ≥ suspect)
+        assert!(
+            (c.suspect_threshold - 0.42).abs() < f32::EPSILON,
+            "v2 默认 suspect_threshold = 0.42(单 keyword/repetition 0.40 不再触发)"
+        );
         assert!((c.w_repeat - 0.40).abs() < f32::EPSILON);
         assert!((c.w_non_cjk - 0.20).abs() < f32::EPSILON);
         assert!((c.w_keyword - 0.40).abs() < f32::EPSILON);
@@ -541,47 +549,58 @@ mod tests {
         )
     }
 
+    /// v2 改:单 keyword 纯 CJK 命中 = 0.40 < 0.42 → **drop**。
+    /// 这是 v2 调高 suspect 阈值的核心动机:单特征不再触发,降低误报。
     #[test]
-    fn single_keyword_pure_cjk_lands_as_suspect_with_default_weights() {
-        // 单 keyword 命中(纯中文,无 non_cjk_ratio 加分)= w_keyword × 1.0 = 0.40 → suspect
+    fn single_keyword_pure_cjk_below_suspect_threshold() {
         let text = "\
 第一章 起
-正文一。
+正文较长内容一。
 本文首发于纵横中文网,谢谢支持。
-正文二。
+正文较长内容二。
+";
+        let out = analyze_default(text);
+        assert!(
+            out.is_empty(),
+            "v2:单 keyword 纯 CJK 命中(0.40 < 0.42)应当 drop,实际 {:?}",
+            out
+        );
+    }
+
+    /// 反向案例:同一关键词命中行**加另一个特征**(如非 CJK 比例)→ 进入 suspect。
+    #[test]
+    fn keyword_plus_non_cjk_reaches_suspect() {
+        let text = "\
+第一章 起
+正文较长内容一。
+本文首发于 https://example.com 谢谢支持。
+正文较长内容二。
 ";
         let out = analyze_default(text);
         assert_eq!(out.len(), 1, "应当只有首发那一行被标:{:?}", out);
         let w = &out[0];
         assert_eq!(w.verdict, WatermarkVerdict::Suspect);
-        assert!((w.score - 0.40).abs() < 1e-5, "纯中文 keyword 单特征应当 = 0.40,实际 {}", w.score);
-        assert_eq!(w.signals.len(), 1, "纯中文行不应触发 non_cjk,只剩 keyword 一条 signal");
-        assert_eq!(w.signals[0].kind, WatermarkSignalKind::KeywordRegex);
-        assert!((w.signals[0].score - 1.0).abs() < f32::EPSILON);
-        assert!(
-            w.signals[0]
-                .detail
-                .as_ref()
-                .map(|s| s.contains("builtin-watermark-first-publish"))
-                .unwrap_or(false),
-            "detail 应当包含命中规则 id,实际为 {:?}",
-            w.signals[0].detail
-        );
+        assert!(w.score >= 0.42 && w.score < 0.70, "实际 {}", w.score);
+        // 至少有 keyword 与 non_cjk 两条 signal
+        let kinds: Vec<WatermarkSignalKind> = w.signals.iter().map(|s| s.kind).collect();
+        assert!(kinds.contains(&WatermarkSignalKind::KeywordRegex));
+        assert!(kinds.contains(&WatermarkSignalKind::NonCjkRatio));
     }
 
     #[test]
     fn span_covers_whole_line() {
-        let text = "正文。\n本文首发于纵横中文网。\n下一段。\n";
+        // 用一个 keyword + non_cjk 双特征行确保命中(单 keyword 在 v2 已不够 suspect)
+        let text = "正文一段。\n请到 https://novel.example.com 看更新。\n下一段较长内容。\n";
         let out = analyze_default(text);
         assert_eq!(out.len(), 1);
-        let line_start = text.find("本文首发").unwrap();
-        let line_end = line_start + "本文首发于纵横中文网。".len();
+        let line_start = text.find("请到").unwrap();
+        let line_end = line_start + "请到 https://novel.example.com 看更新。".len();
         assert_eq!(out[0].span.start, line_start);
         assert_eq!(out[0].span.end, line_end);
         // span 内容应当就是被命中那行
         assert_eq!(
             &text[out[0].span.start..out[0].span.end],
-            "本文首发于纵横中文网。"
+            "请到 https://novel.example.com 看更新。"
         );
     }
 
@@ -676,14 +695,16 @@ mod tests {
 
     #[test]
     fn analyze_result_is_sorted_by_span_start() {
-        // v2 min_line_chars=10:水印行需 ≥ 10 字符;此 fixture 三个水印行各 12+ 字符
+        // v2.1:min_line_chars=10 + suspect=0.42 → 命中行需:≥10 字符 且 单特征 0.40 不够,
+        // 必须 keyword + 另一特征(non_cjk 或 repetition)。
+        // 此 fixture 三个水印行都满足"keyword + non_cjk"。
         let text = "\
-正文。
-本文首发于纵横中文网,请支持正版阅读。
-正文二。
-请访问 https://example.com 阅读最新章节。
-更新最快的小说网站,无广告免费阅读。
-正文三。
+正文一段较长。
+请访问 https://novel.example.com 看最新章节。
+正文二段较长。
+关注 TG 频道 @somenovelchannel 不迷路。
+更新最快的小说网站 https://fast.example.cc 阅读体验最佳。
+正文三段较长。
 ";
         let out = analyze_default(text);
         assert_eq!(out.len(), 3, "实际 {:?}", out);
@@ -698,14 +719,18 @@ mod tests {
     #[test]
     fn fused_score_and_classify_thresholds() {
         let cfg = WatermarkConfig::default();
-        // 单 keyword 1.0 → 0.40 → suspect
+        // 单 keyword 1.0 → 0.40。**v2:0.40 < 0.42 → drop**(从 v1 的 suspect 退到丢弃)
         let sig_kw = vec![WatermarkSignal {
             kind: WatermarkSignalKind::KeywordRegex,
             score: 1.0,
             detail: None,
         }];
         assert!((fused_score(&sig_kw, &cfg) - 0.40).abs() < 1e-5);
-        assert_eq!(classify(0.40, &cfg), Some(WatermarkVerdict::Suspect));
+        assert_eq!(
+            classify(0.40, &cfg),
+            None,
+            "v2:0.40 < suspect_threshold(0.42),单特征命中应丢弃"
+        );
         // keyword + repetition(均 1.0)→ 0.80 → auto
         let sig_two = vec![
             WatermarkSignal {
@@ -724,8 +749,10 @@ mod tests {
         // 全 0 → drop
         assert_eq!(classify(0.0, &cfg), None);
         // 边界:正好等于 suspect_threshold → suspect;正好等于 auto_threshold → auto
-        assert_eq!(classify(0.35, &cfg), Some(WatermarkVerdict::Suspect));
+        assert_eq!(classify(0.42, &cfg), Some(WatermarkVerdict::Suspect));
         assert_eq!(classify(0.70, &cfg), Some(WatermarkVerdict::Auto));
+        // 0.42 略下 → drop
+        assert_eq!(classify(0.41, &cfg), None);
     }
 
     #[test]
@@ -754,10 +781,10 @@ mod tests {
     // 3.2 新特征:行频(repetition)+ 非中文占比(non_cjk_ratio)+ 三特征融合
     // ============================================================================
 
-    /// 同一行重复 50 次 → repetition score = 1.0(capped),fused = w_repeat × 1.0 = 0.40
-    /// → suspect。无 keyword 命中也无 non_cjk。
+    /// v2 改:同一 CJK 行重复 50 次 → repetition score = 1.0,fused = 0.40 < 0.42 → **drop**。
+    /// 这是 v2 调高 suspect 阈值的另一个直接体现:纯重复(无其它信号)不再算水印。
     #[test]
-    fn pure_repetition_alone_lands_as_suspect() {
+    fn pure_repetition_alone_below_suspect_threshold() {
         let line = "这是一行被重复很多次的疑似水印";
         let mut text = String::from("第一章 起\n");
         for _ in 0..50 {
@@ -765,14 +792,11 @@ mod tests {
             text.push('\n');
         }
         let out = analyze_default(&text);
-        assert!(out.len() >= 1, "应当至少有一条 suspect");
-        let w = &out[0];
-        assert_eq!(w.verdict, WatermarkVerdict::Suspect);
-        assert!((w.score - 0.40).abs() < 1e-5, "实际分数 {}", w.score);
-        assert_eq!(w.signals.len(), 1, "纯 CJK 重复行只应有 repetition 一条 signal");
-        assert_eq!(w.signals[0].kind, WatermarkSignalKind::Repetition);
-        assert!((w.signals[0].score - 1.0).abs() < 1e-5);
-        assert_eq!(w.signals[0].detail.as_deref(), Some("出现 50 次"));
+        assert!(
+            out.is_empty(),
+            "v2:纯重复 0.40 < 0.42 应当 drop,实际 {:?}",
+            out
+        );
     }
 
     /// keyword + repetition(均 1.0)→ fused = 0.80 → **auto**。
@@ -876,34 +900,44 @@ mod tests {
 
     /// repetition 公式锁定:count=5 时 score ≈ 0.41;count=50 时 score = 1.0(刚好封顶);
     /// count=100 时仍 = 1.0(超过 50 已饱和)。
+    ///
+    /// v2:由于默认 suspect_threshold=0.42 让单 repetition(fused 0.40)无法 ≥ suspect,
+    /// 这里**直接验算公式**而不走 analyze(否则需要再叠一个特征才能产出 annotation,
+    /// 反而把测试本身复杂化)。
     #[test]
     fn repetition_score_formula_is_log_capped_at_50() {
-        // 用一个低 repeat_count_min 让 count=5 也触发,以便观察分数
-        let line = "重复测试行内容长度足够";
         let cases = [(5usize, 0.41_f32), (50, 1.0), (100, 1.0)];
         for (n, expected) in cases {
-            let mut text = String::from("第一章 起\n");
-            for _ in 0..n {
-                text.push_str(line);
-                text.push('\n');
-            }
-            let book = parse_book(&text);
-            let out = analyze(text.as_str(), &book, &RuleSet::builtin(), &[], &WatermarkConfig::default());
-            let rep_signal = out
-                .iter()
-                .find_map(|w| w.signals.iter().find(|s| s.kind == WatermarkSignalKind::Repetition));
-            // 注意:count=5 时 fused = 0.41 * 0.40 = 0.164 < 0.35,不会进 out。
-            // 所以 count=5 case 我们必须借助 fused_score 直接测公式。
-            if n == 5 {
-                // 直接用 fused_score 验证 repetition 公式(下方独立测试 fused_score_and_classify_thresholds 也覆盖)
-                let s_repeat = (n as f32).log10() / 50f32.log10();
-                assert!((s_repeat - expected).abs() < 0.02, "count={n} 公式分 {s_repeat} 偏离 {expected}");
-            } else {
-                let s = rep_signal
-                    .unwrap_or_else(|| panic!("count={n} 应当产出 repetition signal,实际无,out={:?}", out));
-                assert!((s.score - expected).abs() < 0.02, "count={n} score={} 偏离 {expected}", s.score);
-            }
+            let raw = (n as f32).log10() / 50f32.log10();
+            let score = raw.clamp(0.0, 1.0);
+            assert!(
+                (score - expected).abs() < 0.02,
+                "count={n} 公式分 {score} 偏离预期 {expected}"
+            );
         }
+    }
+
+    /// 端到端验证 repetition signal 真的会出现在 analyze 输出中(只是需要叠加另一个特征
+    /// 才能跨过 suspect_threshold)。
+    #[test]
+    fn repetition_signal_emerges_when_combined_with_keyword() {
+        // 重复 50 次 的带 keyword 行 → keyword 0.40 + repetition 0.40 = 0.80 → auto
+        let line = "首发于 https://example.com 更新最快阅读体验最佳";
+        let mut text = String::from("第一章 起\n");
+        for _ in 0..50 {
+            text.push_str(line);
+            text.push('\n');
+        }
+        let out = analyze_default(&text);
+        assert!(!out.is_empty(), "应当至少有 auto 命中");
+        let w = &out[0];
+        let rep_signal = w
+            .signals
+            .iter()
+            .find(|s| s.kind == WatermarkSignalKind::Repetition)
+            .expect("应当含 repetition signal");
+        assert!((rep_signal.score - 1.0).abs() < 0.02, "count=50 时应当饱和到 1.0");
+        assert_eq!(rep_signal.detail.as_deref(), Some("出现 50 次"));
     }
 
     /// non_cjk 公式锁定:ratio=0.4 → score=0;ratio=0.6 → 0.5;ratio=1.0 → cap 1.0。
@@ -1044,8 +1078,8 @@ mod tests {
         let json = r#"{ "auto_threshold": 0.50 }"#;
         let cfg: WatermarkConfig = serde_json::from_str(json).unwrap();
         assert!((cfg.auto_threshold - 0.50).abs() < 1e-5);
-        // 其余字段应当走 default
-        assert!((cfg.suspect_threshold - 0.35).abs() < 1e-5);
+        // 其余字段应当走 default(v2 后 suspect 默认 0.42)
+        assert!((cfg.suspect_threshold - 0.42).abs() < 1e-5);
         assert_eq!(cfg.min_line_chars, 10);
         assert!(cfg.enabled);
     }

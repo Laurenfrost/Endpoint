@@ -320,12 +320,19 @@ mod tests {
     use super::*;
     use crate::cleaning;
 
-    /// 测试辅助:跑完整"边界识别 + 物化"两步,与阶段二 `parse(.., cleaning, ..)` 行为等价。
-    /// v2 起 cleaning::analyze 需 config——这里用 `cfg_with_leading` 保留 v1 行为
-    /// (剥段首全角),让本模块旧测试的 paragraphs 期望不动。
+    /// 测试辅助:跑完整"边界识别 + 物化"两步。
+    ///
+    /// v2 起 `CleaningConfig::default()` 全关,默认行为是"不清洗"。
+    /// 本 helper **显式全开** 5 个 kind 保留 v1 行为,让本模块旧测试的 paragraphs
+    /// 期望(段首剥全角、行尾去空白、空行压缩等)继续成立。
     fn parse_default(text: &str) -> Book {
-        let mut cfg = cleaning::CleaningConfig::default();
-        cfg.leading_fullwidth_space = true;
+        let cfg = cleaning::CleaningConfig {
+            blank_line_compression: true,
+            leading_fullwidth_space: true,
+            inline_fullwidth_space: true,
+            control_char: true,
+            trailing_whitespace: true,
+        };
         let cleaning_anns = cleaning::analyze(text, &cfg);
         let mut book = parse(text, &RuleSet::builtin(), Metadata::new("测试书", "测试作者")).unwrap();
         materialize_paragraphs(&mut book, text, &cleaning_anns);
