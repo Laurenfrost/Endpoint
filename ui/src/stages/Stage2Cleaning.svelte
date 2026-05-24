@@ -39,20 +39,41 @@
 
   // —— v2 清洗策略面板 ——
   // 默认值与后端 CleaningConfig::default() 严格对齐;改后 dirty=true → 亮"重新分析"。
-  // 重新分析后用 lastApplied 重置 dirty 判定。
-  const DEFAULT_CFG = {
+  const CLEANING_DEFAULT = {
     blank_line_compression: true,
     leading_fullwidth_space: false, // v2 默认关:保留段首缩进
     inline_fullwidth_space: true,
     control_char: true,
     trailing_whitespace: true,
   };
-  let cfg = $state({ ...DEFAULT_CFG });
-  let lastApplied = $state({ ...DEFAULT_CFG });
-  const dirty = $derived(
-    Object.keys(DEFAULT_CFG).some((k) => cfg[k] !== lastApplied[k])
+  let cfg = $state({ ...CLEANING_DEFAULT });
+  let cleaningLastApplied = $state({ ...CLEANING_DEFAULT });
+  const cleaningDirty = $derived(
+    Object.keys(CLEANING_DEFAULT).some((k) => cfg[k] !== cleaningLastApplied[k])
   );
   let strategyOpen = $state(false);
+
+  // —— v2.1 水印阈值/权重面板 ——
+  // 默认值与后端 WatermarkConfig::default() 严格对齐;改后 dirty 同 cleaning 联动。
+  const WM_DEFAULT = {
+    auto_threshold: 0.70,
+    suspect_threshold: 0.35,
+    w_repeat: 0.40,
+    w_non_cjk: 0.20,
+    w_keyword: 0.40,
+    repeat_count_min: 5,
+    min_line_chars: 10,
+    enabled: true,
+  };
+  let wmCfg = $state({ ...WM_DEFAULT });
+  let wmLastApplied = $state({ ...WM_DEFAULT });
+  const wmDirty = $derived(
+    Object.keys(WM_DEFAULT).some((k) => wmCfg[k] !== wmLastApplied[k])
+  );
+  let wmThresholdOpen = $state(false);
+
+  // 共用的 dirty / 重新分析
+  const anyDirty = $derived(cleaningDirty || wmDirty);
   let reanalyzing = $state(false);
   let reanalyzeError = $state("");
 
@@ -65,9 +86,15 @@
     reanalyzeError = "";
     setBusy(true);
     try {
-      const dto = await loadAndAnalyze(pipeline.sourcePath, null, { ...cfg });
+      const dto = await loadAndAnalyze(
+        pipeline.sourcePath,
+        null,
+        { ...cfg },
+        { ...wmCfg },
+      );
       setPipeline(dto, pipeline.sourcePath);
-      lastApplied = { ...cfg };
+      cleaningLastApplied = { ...cfg };
+      wmLastApplied = { ...wmCfg };
     } catch (e) {
       reanalyzeError = String(e);
     } finally {
@@ -75,6 +102,17 @@
       setBusy(false);
     }
   }
+
+  // —— 水印阈值面板的字段元数据(label / step / kind) ——
+  const WM_FIELDS = [
+    { key: "auto_threshold", label: "auto 阈值", kind: "float", min: 0, max: 1, step: 0.05, hint: "≥ 此值自动删除(默认 0.70)" },
+    { key: "suspect_threshold", label: "suspect 阈值", kind: "float", min: 0, max: 1, step: 0.05, hint: "≥ 此值进灰区(默认 0.35)" },
+    { key: "w_repeat", label: "行频权重", kind: "float", min: 0, max: 1, step: 0.05, hint: "默认 0.40" },
+    { key: "w_non_cjk", label: "非中文权重", kind: "float", min: 0, max: 1, step: 0.05, hint: "默认 0.20" },
+    { key: "w_keyword", label: "关键词权重", kind: "float", min: 0, max: 1, step: 0.05, hint: "默认 0.40" },
+    { key: "repeat_count_min", label: "行频最小次数", kind: "int", min: 1, max: 100, step: 1, hint: "默认 5" },
+    { key: "min_line_chars", label: "短行豁免字符数", kind: "int", min: 1, max: 50, step: 1, hint: "默认 10 (v2 起从 4 上调)" },
+  ];
 
   // —— 数据派生 ——
   // 清洗列表只显示阶段二的 4 种格式整理变体(把 watermark_* 镜像剔除,后者在水印列表里看)。
@@ -205,11 +243,11 @@
         <span class="caret">{strategyOpen ? "▼" : "▶"}</span>
         清洗策略
         <span class="muted">{Object.values(cfg).filter(Boolean).length} / 5 启用</span>
-        {#if dirty}<span class="dirty-dot" title="改动未应用"></span>{/if}
+        {#if cleaningDirty}<span class="dirty-dot" title="改动未应用"></span>{/if}
       </button>
       {#if strategyOpen}
         <div class="strategy-body">
-          {#each Object.keys(DEFAULT_CFG) as k}
+          {#each Object.keys(CLEANING_DEFAULT) as k}
             <label class="strat-row">
               <input type="checkbox" bind:checked={cfg[k]} />
               <span class="strat-label">{KIND_LABEL[k] ?? k}</span>
@@ -218,21 +256,56 @@
               {/if}
             </label>
           {/each}
-          <div class="strategy-actions">
-            <button
-              class="reanalyze"
-              class:hot={dirty}
-              disabled={!dirty || reanalyzing}
-              onclick={reanalyze}
-              type="button"
-            >
-              {reanalyzing ? "分析中…" : dirty ? "重新分析" : "无改动"}
-            </button>
-            {#if reanalyzeError}<span class="err">{reanalyzeError}</span>{/if}
-          </div>
         </div>
       {/if}
     </section>
+
+    <!-- ============ v2.1:水印阈值高级折叠面板 ============ -->
+    <section class="strategy">
+      <button class="strategy-header" onclick={() => (wmThresholdOpen = !wmThresholdOpen)} type="button">
+        <span class="caret">{wmThresholdOpen ? "▼" : "▶"}</span>
+        水印阈值 <span class="muted">高级</span>
+        {#if wmDirty}<span class="dirty-dot" title="改动未应用"></span>{/if}
+      </button>
+      {#if wmThresholdOpen}
+        <div class="strategy-body">
+          <label class="strat-row">
+            <input type="checkbox" bind:checked={wmCfg.enabled} />
+            <span class="strat-label">启用水印检测</span>
+            <span class="strat-hint">关闭后直接跳过整段水印分析</span>
+          </label>
+          {#each WM_FIELDS as f}
+            <div class="strat-row strat-numeric">
+              <span class="strat-label">{f.label}</span>
+              <input
+                type="range"
+                min={f.min}
+                max={f.max}
+                step={f.step}
+                bind:value={wmCfg[f.key]}
+                disabled={!wmCfg.enabled}
+              />
+              <span class="strat-value">{f.kind === "float" ? Number(wmCfg[f.key]).toFixed(2) : wmCfg[f.key]}</span>
+              <span class="strat-hint">{f.hint}</span>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </section>
+
+    <!-- 共享的"重新分析"按钮 —— cleaning / watermark 任一面板 dirty 时亮起 -->
+    <div class="reanalyze-bar">
+      <button
+        class="reanalyze"
+        class:hot={anyDirty}
+        disabled={!anyDirty || reanalyzing}
+        onclick={reanalyze}
+        type="button"
+      >
+        {reanalyzing ? "分析中…" : anyDirty ? "重新分析" : "策略 / 阈值 无改动"}
+      </button>
+      {#if reanalyzeError}<span class="err">{reanalyzeError}</span>{/if}
+    </div>
 
     <!-- ============ 上半屏:格式清洗(红色) ============ -->
     <section class="block">
@@ -562,10 +635,32 @@
     cursor: pointer;
   }
   .strat-row input { margin: 0; }
+  .strat-row.strat-numeric {
+    cursor: default;
+    display: grid;
+    grid-template-columns: 100px 1fr 44px;
+    gap: 6px;
+    align-items: center;
+  }
+  .strat-row.strat-numeric .strat-hint {
+    grid-column: 1 / -1;
+    padding-left: 100px;
+    margin-top: -2px;
+  }
+  .strat-row.strat-numeric input[type="range"] {
+    width: 100%;
+    margin: 0;
+  }
+  .strat-value {
+    font-family: Consolas, monospace;
+    font-size: 10px;
+    color: #1f2933;
+    text-align: right;
+  }
   .strat-label { min-width: 90px; }
   .strat-hint { color: #9aa5b1; font-size: 10px; }
-  .strategy-actions {
-    margin-top: 6px;
+  .reanalyze-bar {
+    margin: 6px 0 14px 0;
     display: flex;
     align-items: center;
     gap: 8px;

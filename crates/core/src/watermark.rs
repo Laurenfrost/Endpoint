@@ -22,6 +22,7 @@
 use std::collections::{HashMap, HashSet};
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     Book, BookEntry, CleaningAnnotation, CleaningKind, Span, WatermarkAnnotation, WatermarkSignal,
@@ -30,7 +31,11 @@ use crate::domain::{
 use crate::rules::{RuleKind, RuleSet};
 
 /// 水印检测的可调参数。默认值见 [`Default`] 实现与 `docs/stage3-design.md` 第三节。
-#[derive(Debug, Clone)]
+///
+/// **v2 起加 serde derive + `#[serde(default)]`**,允许前端只传一部分字段
+/// (例如只想改 `auto_threshold`)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WatermarkConfig {
     /// `score >= auto_threshold` → verdict = `auto`,镜像到 cleaning。默认 0.70。
     pub auto_threshold: f32,
@@ -44,7 +49,9 @@ pub struct WatermarkConfig {
     pub w_keyword: f32,
     /// 行频统计触发的最小重复次数。低于此值的重复行不计 `repetition` 分。默认 5。
     pub repeat_count_min: u32,
-    /// 短行豁免阈值:行字符数 < 此值时所有特征都不打分(避免把"嗯。"误标)。默认 4。
+    /// 短行豁免阈值:行字符数 < 此值时所有特征都不打分。
+    /// **v2 默认 10**(v1 是 4——实测发现 4 无法挡住"嗯,好的""哦,这样啊"等
+    /// 5-6 字的对白)。
     pub min_line_chars: usize,
     /// 关闭水印检测开关。`false` 时 [`analyze`] 直接返回空列表;用于 A/B 与回归测试。默认 `true`。
     pub enabled: bool,
@@ -59,7 +66,7 @@ impl Default for WatermarkConfig {
             w_non_cjk: 0.20,
             w_keyword: 0.40,
             repeat_count_min: 5,
-            min_line_chars: 4,
+            min_line_chars: 10, // v2:4 → 10
             enabled: true,
         }
     }
@@ -202,7 +209,12 @@ pub fn analyze(
     out
 }
 
-/// 判断一行是否进入水印评分(跳过 heading / 空行 / 短行)。返回 trim 后的子切片以复用。
+/// 判断一行是否进入水印评分(跳过 heading / 空行 / 短行 / **对白行**)。
+/// 返回 trim 后的子切片以复用。
+///
+/// **v2 新增对白行豁免**:中文小说里高频出现的角色对白(被「」/『』/"" 包围)
+/// 经常会因为短词/重复台词触发 repetition,但用户从未把它们当作水印。
+/// 这里在 eligibility 阶段直接剔除——其行频不会污染统计,自身也不会被打分。
 fn eligible_trimmed<'a>(
     source: &'a str,
     line_start: usize,
@@ -217,38 +229,74 @@ fn eligible_trimmed<'a>(
     if trimmed.is_empty() {
         return None;
     }
-    // 短行豁免:避免把"嗯。"、"哦?"等口头禅当水印
+    // 短行豁免:v2 起默认 10 字符,避免把"嗯。"、"哦,是的"等口头禅当水印
     if trimmed.chars().take(config.min_line_chars).count() < config.min_line_chars {
+        return None;
+    }
+    // v2 对白行豁免
+    if is_dialogue_line(trimmed) {
         return None;
     }
     Some(trimmed)
 }
 
-/// 统计字符串中 CJK 字符数与总字符数(按 Unicode `char`,不按字节)。
+/// 是否为对白行:首尾分别是中文小说常用引号对中的开/闭引号。
 ///
-/// CJK 范围按 `docs/stage3-design.md` 第三节:
+/// 允许首尾**不严格匹配**(如 `「话「』`)——`docs/stage3-v2-design.md` 第二节
+/// 决策 6 明确"对白行豁免引号集合 = 3 对",这里取并集判断,容忍排版偶然失配。
+///
+/// 三对引号:
+/// - 直角引号:`「`(U+300C)/ `」`(U+300D)
+/// - 双直角引号:`『`(U+300E)/ `』`(U+300F)
+/// - 弯引号:`"`(U+201C)/ `"`(U+201D)
+fn is_dialogue_line(trimmed: &str) -> bool {
+    let mut chars = trimmed.chars();
+    let first = chars.next();
+    let last = trimmed.chars().last();
+    match (first, last) {
+        (Some(f), Some(l)) if f != l => {
+            matches!(f, '「' | '『' | '\u{201C}') && matches!(l, '」' | '』' | '\u{201D}')
+        }
+        _ => false,
+    }
+}
+
+/// 统计字符串中**中文文本场景下的字符**数与总字符数(按 Unicode `char`,不按字节)。
+///
+/// 中文文本场景字符范围(v2 起扩展,详见 `docs/stage3-v2-design.md`):
 /// - `U+4E00..=U+9FFF`:基本汉字
 /// - `U+3400..=U+4DBF`:CJK 扩展 A
-/// - `U+3000..=U+303F`:常用中文标点(包含「」『』、。等)
+/// - `U+3000..=U+303F`:CJK 常用标点(「」『』、。等)
 /// - `U+FF00..=U+FFEF`:全角字母数字
+/// - **v2 新增** `U+2000..=U+206F`:通用标点(含 `…` U+2026、`—` U+2014、`–` U+2013 等中文常用标点)
+/// - **v2 新增** `U+00A0`:NBSP(行内不可见空白,中文 txt 偶有)
+/// - **v2 新增** `U+00B7`:中间点(用作中文姓名分隔,如「玛丽·安东尼」)
+/// - **v2 新增** `U+FEFF`:零宽不换行空格(BOM 残留)
 pub(crate) fn count_cjk_and_total(s: &str) -> (usize, usize) {
     let mut cjk = 0;
     let mut total = 0;
     for c in s.chars() {
         total += 1;
-        if is_cjk(c) {
+        if is_chinese_context_char(c) {
             cjk += 1;
         }
     }
     (cjk, total)
 }
 
-fn is_cjk(c: char) -> bool {
+/// 判断字符是否属于"中文文本场景"——核心动机是 `non_cjk_ratio` 特征不把中文常用
+/// 标点(尤其 `…` `——`)误算成"非中文",从而避免把对白密集的正文标为水印。
+/// 详见 `docs/stage3-v2-design.md` 决策 2。
+fn is_chinese_context_char(c: char) -> bool {
     let cp = c as u32;
     (0x4E00..=0x9FFF).contains(&cp)
         || (0x3400..=0x4DBF).contains(&cp)
         || (0x3000..=0x303F).contains(&cp)
         || (0xFF00..=0xFFEF).contains(&cp)
+        || (0x2000..=0x206F).contains(&cp) // v2 新增:通用标点(含 … — –)
+        || cp == 0x00A0                     // v2 新增:NBSP
+        || cp == 0x00B7                     // v2 新增:中间点
+        || cp == 0xFEFF                     // v2 新增:零宽不换行空格
 }
 
 /// 把 verdict==auto 的水印**镜像**到 `cleaning` 列表,使 EPUB 物化路径无感知地完成扣除。
@@ -471,7 +519,8 @@ mod tests {
         let sum = c.w_repeat + c.w_non_cjk + c.w_keyword;
         assert!((sum - 1.0).abs() < 1e-6, "三特征权重总和应当为 1.0,实际为 {sum}");
         assert_eq!(c.repeat_count_min, 5);
-        assert_eq!(c.min_line_chars, 4);
+        // v2:4 → 10
+        assert_eq!(c.min_line_chars, 10, "v2 默认短行豁免上调到 10 字符");
         assert!(c.enabled);
     }
 
@@ -627,16 +676,17 @@ mod tests {
 
     #[test]
     fn analyze_result_is_sorted_by_span_start() {
+        // v2 min_line_chars=10:水印行需 ≥ 10 字符;此 fixture 三个水印行各 12+ 字符
         let text = "\
 正文。
-首发于纵横中文网。
+本文首发于纵横中文网,请支持正版阅读。
 正文二。
-请访问 https://example.com 阅读。
-更新最快,无广告阅读。
+请访问 https://example.com 阅读最新章节。
+更新最快的小说网站,无广告免费阅读。
 正文三。
 ";
         let out = analyze_default(text);
-        assert_eq!(out.len(), 3);
+        assert_eq!(out.len(), 3, "实际 {:?}", out);
         for w in out.windows(2) {
             assert!(
                 w[0].span.start < w[1].span.start,
@@ -871,7 +921,7 @@ mod tests {
         }
     }
 
-    /// `count_cjk_and_total` helper:CJK 范围按设计文档第三节(基本汉字 + 扩展 A + 中文标点 + 全角)。
+    /// `count_cjk_and_total` helper:中文场景字符范围按设计文档第三节 v2 扩展。
     #[test]
     fn count_cjk_and_total_recognizes_designated_ranges() {
         // 基本汉字
@@ -890,6 +940,114 @@ mod tests {
         assert_eq!((cjk, total), (4, 9), "应得 4 CJK + 5 non-CJK(含空格)= 9 total");
         // 空串
         assert_eq!(count_cjk_and_total(""), (0, 0));
+    }
+
+    /// v2 扩展:省略号 `…`、破折号 `—`/`–`、中间点 `·`、NBSP、零宽 等
+    /// 不应被算作 non-CJK——这是 v1 把对白密集的正文标为水印的核心病因。
+    #[test]
+    fn count_cjk_recognizes_v2_extended_punctuation() {
+        // 省略号 U+2026
+        assert_eq!(count_cjk_and_total("……"), (2, 2));
+        // 破折号 U+2014 / en dash U+2013
+        assert_eq!(count_cjk_and_total("——"), (2, 2));
+        assert_eq!(count_cjk_and_total("––"), (2, 2));
+        // 中间点 U+00B7(中文姓名分隔)
+        assert_eq!(count_cjk_and_total("玛丽·安东尼"), (6, 6));
+        // NBSP U+00A0
+        assert_eq!(count_cjk_and_total("正\u{00A0}文"), (3, 3));
+        // 零宽 U+200B / U+FEFF
+        assert_eq!(count_cjk_and_total("正\u{200B}文\u{FEFF}"), (4, 4));
+        // 典型对白行(省略号 + 中文 + 全角逗号)— v1 这里 ratio 高(……占很多 char),v2 应当全 CJK
+        let line = "「他停顿了一下\u{FF0C}然后说道……」";
+        let (cjk, total) = count_cjk_and_total(line);
+        assert_eq!(cjk, total, "纯中文对白 + 省略号应当 100% CJK,实际 {}/{}", cjk, total);
+    }
+
+    /// v2 对白行豁免:即使重复 50 次,被引号包围的对白也不应触发 repetition。
+    #[test]
+    fn dialogue_line_repeated_does_not_trigger_repetition() {
+        let lines = [
+            "「这是一句对白内容。」",          // 「」
+            "『另一种对白内容。』",            // 『』
+            "\u{201C}弯引号的对白内容。\u{201D}", // ""
+        ];
+        for line in lines {
+            let mut text = String::from("第一章 起\n");
+            for _ in 0..50 {
+                text.push_str(line);
+                text.push('\n');
+            }
+            let out = analyze_default(&text);
+            assert!(
+                out.is_empty(),
+                "对白行 `{}` 重复 50 次也不应触发水印,实际 {:?}",
+                line,
+                out
+            );
+        }
+    }
+
+    /// v2 对白豁免接受首尾**错配**(`「…』` 这种排版错误也豁免)。
+    #[test]
+    fn dialogue_line_exemption_tolerates_mismatched_quotes() {
+        let line = "「这一行用错了引号但仍是对白』";
+        let mut text = String::from("第一章\n");
+        for _ in 0..50 {
+            text.push_str(line);
+            text.push('\n');
+        }
+        let out = analyze_default(&text);
+        assert!(out.is_empty(), "错配引号对白应当豁免,实际 {:?}", out);
+    }
+
+    /// v2 修复:含省略号的对白行 + 重复出现,非中文占比与行频都不会推升 score 到 suspect。
+    #[test]
+    fn ellipsis_heavy_dialogue_does_not_get_flagged() {
+        let line = "「呃……我不太清楚……」";
+        let mut text = String::from("第一章\n");
+        for _ in 0..30 {
+            text.push_str(line);
+            text.push('\n');
+        }
+        let out = analyze_default(&text);
+        assert!(
+            out.is_empty(),
+            "省略号密集的对白不应被标(v1 病因):{:?}",
+            out
+        );
+    }
+
+    /// v2 短行豁免上调到 10:5-6 字的对白即使不是引号包裹也应豁免。
+    #[test]
+    fn short_response_lines_below_ten_chars_are_exempt() {
+        // 不是引号包裹但 < 10 字符的常见对白
+        let lines = ["嗯,好的。", "我知道了。", "怎么了?", "哦,是这样。"];
+        for line in lines {
+            let mut text = String::from("第一章\n");
+            for _ in 0..50 {
+                text.push_str(line);
+                text.push('\n');
+            }
+            let out = analyze_default(&text);
+            assert!(
+                out.is_empty(),
+                "< 10 字符的短对白 `{}` 应豁免,实际 {:?}",
+                line,
+                out
+            );
+        }
+    }
+
+    /// v2:WatermarkConfig 反序列化测试——前端只传部分字段时,缺省字段走 Default。
+    #[test]
+    fn watermark_config_deserializes_partial_json() {
+        let json = r#"{ "auto_threshold": 0.50 }"#;
+        let cfg: WatermarkConfig = serde_json::from_str(json).unwrap();
+        assert!((cfg.auto_threshold - 0.50).abs() < 1e-5);
+        // 其余字段应当走 default
+        assert!((cfg.suspect_threshold - 0.35).abs() < 1e-5);
+        assert_eq!(cfg.min_line_chars, 10);
+        assert!(cfg.enabled);
     }
 
     /// 短行豁免应当在 **eligibility** 阶段就生效,导致该行**不进入** repetition 计数。

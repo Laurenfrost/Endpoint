@@ -29,15 +29,24 @@ export const pickOutputFile = (defaultPath) =>
 export const pickExecutableFile = () => invoke("pick_executable_file");
 
 /// 加载 txt + 跑完整管线。
-/// `cleaningConfig`:阶段三 v2 新增,前端策略面板的勾选状态(可选,缺省走 default)。
+/// `cleaningConfig`:阶段三 v2 新增,前端清洗策略面板的勾选状态(可选,缺省走 default)。
 ///   形状:{ blank_line_compression, leading_fullwidth_space, inline_fullwidth_space,
 ///          control_char, trailing_whitespace } —— 都是 bool;后端 #[serde(default)]
 ///          允许只传部分字段。
-export const loadAndAnalyze = (inputPath, encodingOverride, cleaningConfig) =>
+/// `watermarkConfig`:阶段三 v2.1 新增,水印阈值/权重面板的设置(可选,缺省走 default)。
+///   形状:{ auto_threshold, suspect_threshold, w_repeat, w_non_cjk, w_keyword,
+///          repeat_count_min, min_line_chars, enabled };同样 #[serde(default)]。
+export const loadAndAnalyze = (
+  inputPath,
+  encodingOverride,
+  cleaningConfig,
+  watermarkConfig,
+) =>
   invoke("load_and_analyze", {
     inputPath,
     encodingOverride: encodingOverride ?? null,
     cleaningConfig: cleaningConfig ?? null,
+    watermarkConfig: watermarkConfig ?? null,
   });
 
 export const buildEpub = ({ outputPath, title, author, kepubifyPath }) =>

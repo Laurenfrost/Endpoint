@@ -136,16 +136,25 @@ pub async fn load_and_analyze(
     input_path: String,
     encoding_override: Option<String>,
     cleaning_config: Option<serde_json::Value>,
+    watermark_config: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     let task_id = state.next_task_id("load");
     let cancel_flag = state.register_cancel(&task_id);
 
-    // 阶段三 v2:把前端传的 cleaning_config(JSON 对象)反序列化为 CleaningConfig。
-    // 反序列化失败时返回错误,不静默 fallback——避免用户改了配置但实际未生效。
+    // 阶段三 v2:把前端传的 cleaning_config / watermark_config(JSON 对象)
+    // 反序列化为对应 Config。反序列化失败时返回错误,不静默 fallback——避免
+    // 用户改了配置但实际未生效。
     let cleaning_cfg = match cleaning_config {
         Some(v) => Some(
             serde_json::from_value::<endpoint_core::cleaning::CleaningConfig>(v)
                 .map_err(|e| format!("cleaning_config 反序列化失败: {e}"))?,
+        ),
+        None => None,
+    };
+    let watermark_cfg = match watermark_config {
+        Some(v) => Some(
+            serde_json::from_value::<endpoint_core::watermark::WatermarkConfig>(v)
+                .map_err(|e| format!("watermark_config 反序列化失败: {e}"))?,
         ),
         None => None,
     };
@@ -162,9 +171,9 @@ pub async fn load_and_analyze(
             rules_path: None,
             kepubify_path: None,
             cancel_token: Some(cancel_flag),
-            // 阶段三 3.5(推迟到阶段四)之前用 default;前端暂无入口调阈值。
-            watermark: None,
-            // 阶段三 v2 新增:前端策略面板的勾选状态
+            // 阶段三 v2.1 新增:前端水印阈值面板的设置
+            watermark: watermark_cfg,
+            // 阶段三 v2 新增:前端清洗策略面板的勾选状态
             cleaning: cleaning_cfg,
         };
         // 阶段 1 不强制元数据,先用占位;阶段 4 通过 build_epub 的 title/author 参数覆盖。
