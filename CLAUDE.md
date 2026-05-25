@@ -245,21 +245,107 @@ LLM 客户端定义为可替换的接口（Rust trait）。核心库依赖「能
 - VirtualText 行高靠估算，长段落实际渲染可能略超估算槽位（CJK 网文中肉眼难察；若后续发现明显问题再加 ResizeObserver 二次校正）。
 - Cancel 接口预留但未实装（核心库长循环只挂 TODO 注释）。
 
-### 阶段三：本地水印智能
-填入本地 NLP 水印检测：行频统计、非中文占比、关键词正则的多特征打分漏斗（困惑度等高级特征可后放）。产出红黄高亮 + 侧边栏可疑列表。纯本地、可解释、零成本。
-**入口**：阶段二 `Stage2Cleaning.svelte` 已留好「灰区/可疑(占位)」位置，黄色 ann layer 直接挂上即可显示；核心库新增 `watermark` 模块产出 `WatermarkAnnotation`，作为 `PipelineOutput` 的**新增字段**（CLAUDE.md 第十二节工作约定：新增字段 OK，改动已有字段需先呈请用户）。
+### 阶段三：本地水印智能 + 用户控制权 — ✅ 已完成(v1 + v2)
 
-### 阶段四：LLM 兜底与导出精修
-最后上最不确定的部分：LLM 灰区仲裁（水印灰区、超长区间漏标题、元数据抓取）、导出精修（字体嵌入、CSS 自定义、元数据编辑、kepubify 选项）。LLM 排最后因为它是可选增强——前四阶段没它也能完整工作。
+**v1(3.0-3.4)目标**：核心库填本地水印检测(行频 / 非中文占比 / 关键词正则三特征 + 加权融合 + 双阈值分流);Stage2 把"灰区/可疑(占位)"填实成 auto(橙)+ suspect(黄)+ tab + signals 卡片;auto 自动镜像到 cleaning,EPUB 自然扣除;suspect 保留在 EPUB 等待用户决策。
+**详情** `docs/stage3-design.md`(子阶段 + 契约 + 真机 checklist 真相源)。
+
+**v2(v2.0-v2.2)目标(基于 v1 真机反馈)**:补全"高级选项 / 手动调整"那一半——v1 只做了"智能默认",没给用户控制权。v2 把:cleaning 策略拆细 + 默认全关 + 用户主动开;watermark 精度修复(对白行豁免、CJK 标点扩展、min_line_chars=10、suspect_threshold=0.42);每张候选卡片接受/拒绝按钮(三态)+ 批量栏 + 决策叠加到 EPUB 输出。
+**详情** `docs/stage3-v2-design.md`(决策表 + 子阶段 + 实际交付)。
+
+**实际交付**:
+- 核心库新增 `watermark` 模块:`analyze`(三特征 + 双阈值)/ `merge_auto_into_cleaning`(auto → cleaning 镜像)/ `apply_user_decisions`(v2.2 用户决策叠加)/ `WatermarkConfig`(可序列化,默认值 v2 调过)
+- 核心库 `cleaning` 拆细:5 个 kind(BlankLineCompression / Leading 与 Inline 拆出的 FullwidthSpace / ControlChar / TrailingWhitespace)+ `CleaningConfig`(每 kind 一个 enabled,默认全关);TrailingWhitespace 字符集扩到含 `\r` / NBSP / 零宽
+- 核心库 `chapter::parse` 拆分:只识别边界,`materialize_paragraphs` 独立成函数(被 watermark::analyze 之后调,让镜像与决策都能影响 paragraphs)
+- 领域模型契约扩展:`CleaningKind` 8 项(原 `fullwidth_space` 消失,拆 leading/inline + 加 3 项 watermark 镜像)/ `WatermarkAnnotation` / `WatermarkSignal` / `WatermarkVerdict` / `WatermarkSignalKind` / `UserDecision` / `DecisionScope` / `DecisionVerdict`
+- 规则库:`builtin_rules()` 加 7 条内置 `RuleKind::Watermark` 规则(URL / www / TG / 域名 / 首发 / 盗版 / 免费阅读)
+- 桥接层:`load_and_analyze` 加 `cleaning_config` + `watermark_config` 参数;`build_epub` 加 `decisions` 参数(后端调 `apply_user_decisions` + 重 materialize 后再 EPUB)
+- 前端 Stage2:策略折叠面板(5 checkbox)+ 阈值高级折叠面板(7 滑块)+ 三层标注(红/橙/黄)+ 水印列表(tab + 卡片 + signals 进度条)+ 卡片三态按钮 `[✓接受][✗拒绝]`(同按钮再点 = 取消)+ 批量栏 + reload 提示
+- 前端 Stage4:build 时把 `decisions` 序列化传给 `build_epub`,按钮下方显示决策计数
+- 进度事件 stage 枚举扩到 6 项(`decoding` / `cleaning` / `chapter` / `watermark` / `epub` / `kepubify`)
+- 测试统计:118 个核心库测试 + 6 个 ByteIndex 前端测试全绿;`cargo check --workspace` 干净;`npm run build` 干净
+- 真机验证:v1 + v2 已通过
+
+**v2 起的关键设计变化**(后续阶段必须遵守):
+1. **"智能默认 = 不动用户文本"**:`CleaningConfig::default()` 全关,清洗策略改为用户主动开启(详见 `docs/stage3-v2-design.md` 第二节决策 10)
+2. **单特征不再触发 suspect**:`WatermarkConfig::default().suspect_threshold = 0.42`,需要两个独立特征(详见决策 11)
+3. **`fullwidth_space` snake_case 已消失**:拆为 `leading_fullwidth_space`(段首)+ `inline_fullwidth_space`(行内连续 ≥2)。v2 唯一一处刻意契约破坏
+4. **用户决策仅本次会话**:不持久化,reload 即丢;持久化版本(规则回流)是阶段四的事
+
+### 阶段四:LLM 兜底 + 规则回流 + 导出精修
+
+**目标**:把"前面几阶段刻意推迟的高风险 / 可选 / 重 UI"功能补齐。LLM 是可选增强——所有功能必须保持**没有 LLM 也能完整工作**(CLAUDE.md 第三节第 4 条)。
+
+**核心方向**(按从底到上、低风险到高风险排序):
+
+1. **LLM 客户端模块**(纯 Rust trait + 1-2 个具体实现 + 配置入口)
+   - trait `LlmClient`,核心库依赖此抽象;`NoopLlmClient` 实现给"未配 API key"场景
+   - 至少接入 Anthropic Claude(用户使用频次最高);OpenAI 兼容接口可二期
+   - API key 存放:OS keychain 优先,fallback 到本地配置文件(明文 + 警告)
+   - 前端 Stage 1 或独立设置面板给"配置 LLM 提供商 + API key + 模型选型"入口
+
+2. **LLM 灰区仲裁**(消费 v2 的 suspect 列表)
+   - 把 watermark suspect 行 + 上下文 batch 发给 LLM,返回 verdict(是水印 / 是正文)+ 解释
+   - 章节解析的超长区间补漏(原 CLAUDE.md 第六节阶段三描述但 v1/v2 未做)
+   - 元数据抓取(从前 N 章正文里推断书名 / 作者,与用户填的元数据比对)
+
+3. **规则回流**(把决策抽象成可复用规则)
+   - 用户决策(尤其 watermark 拒绝)经 LLM 归纳 → 生成 `RuleKind::Watermark` 规则
+   - 存回 `RuleSet.json`(`source: RuleSource::LlmGenerated`),下次扫描自动跳过同类
+   - 把"仅本次会话决策"升级为"持久化偏好"
+
+4. **导出精修**
+   - **字体嵌入**:默认思源宋体 / 思源黑体(Source Han / Noto CJK)放进 epub zip + CSS `@font-face`(完整字体先,子集化推后)
+   - **CSS 主题预设**:3-5 套预设(标准 / 古风 / 高对比度 / ...)+ 高级用户可直接编辑源码
+   - **封面 UI**:Stage4 加封面图片选择 / 预览 / 进 EPUB manifest;`Metadata.cover: Option<Vec<u8>>` 已预留
+   - **元数据编辑增强**:简介(Description)/ 出版社 / ISBN 等可选字段
+   - **kepubify 选项暴露**:目前只能"开/关",可考虑暴露常用 CLI flags
+
+5. **测试样本回流 + 微调默认**
+   - 用户多本网文实测后,如发现误删率 / 漏删率不平衡,微调 `WatermarkConfig::default()` 与
+     `builtin_rules()` 中的 watermark 规则集
+   - 阈值默认调整记录回写 `docs/stage3-v2-design.md` 第二节决策表(沿用 v2 决策 10/11 风格)
+
+**已知技术债**(可在阶段四顺手清,也可不动):
+- VirtualText 行高靠估算,长段落实际渲染可能略超估算槽位——若用户没遇到明显问题,可不加 ResizeObserver
+- Cancel 接口预留但未实装(`TODO(cancel)` 散落核心库)——若没遇到需要中断的场景,可不补
+- 字体子集化(原约定 v1 / v2 不做,体积大但简单)
+
+**禁区**:
+- 不动阶段二契约(`Span` / `Chapter.heading_span` / `Volume.heading_span` / `BookEntry` 枚举形状)
+- 不动阶段三 v2 契约(`CleaningKind` 8 项 / `WatermarkAnnotation` / `UserDecision` 3 类型)
+- 不动 `VirtualText` / `OverviewRuler` / 三栏骨架核心交互(Stage4 内部可改、Stage1/2/3 不动)
+- LLM 不得变为强依赖——所有功能必须可降级到"未配 API key"路径
 
 ---
 
 ## 十二、给 Claude Code 的工作约定
 
-- 动手前确认当前处于路线图哪个阶段，不要跨阶段实现未到的功能（尤其不要在阶段四之前引入 LLM 依赖）。
-- 任何核心库代码不得 import Tauri 或前端相关依赖，保持核心库可独立编译与测试。
-- 为核心库的每个模块编写单元测试，尤其编码探测、章节解析、水印检测——这些逻辑密集且易回归。
-- **富标注输出契约已于阶段一末冻结**（详见 `crates/core/src/domain.rs` 模块顶部 doc comment）。任何对 `Span` / `CleaningAnnotation` / `Chapter` / `Volume` / `PipelineOutput` 已有字段的改动，必须先把改动方案呈给用户确认，并跨模块清点所有消费方（界面层、EPUB 构建、未来水印检测）。新增字段比改动已有字段更安全。
-- 涉及 EPUB 构建的改动，提示用户做真机验证。
-- 遵循「智能默认 + 高级选项」：每个自动化功能都应有手动覆盖入口。
-- 提交信息和注释使用中文或英文均可，保持与现有代码一致。
+- 动手前确认当前处于路线图哪个阶段,不要跨阶段实现未到的功能。**阶段三 v2 已完成,当前在阶段四**。
+- 任何核心库代码不得 import Tauri 或前端相关依赖,保持核心库可独立编译与测试。
+- 为核心库的每个模块编写单元测试,尤其编码探测、章节解析、水印检测——这些逻辑密集且易回归。
+- **富标注输出契约**:
+  - 阶段一末冻结(详见 `crates/core/src/domain.rs` 模块顶部 doc comment)
+  - 阶段三 v1 扩展:`PipelineOutput.watermark` / `CleaningKind` 加 3 项 `Watermark*`
+  - 阶段三 v2 扩展:`CleaningKind` 8 项(`fullwidth_space` 已消失,拆为
+    `leading_fullwidth_space` + `inline_fullwidth_space`);新增 `UserDecision` /
+    `DecisionScope` / `DecisionVerdict`
+  - 任何对**已有字段**的改动必须先呈用户。新增字段更安全。
+  - `pipeline_output_json_shape_is_frozen` 测试 +
+    `cleaning_kind_serializes_all_eight_variants_snake_case` 等是 IPC 契约的代码级锚点,
+    任何偏离会被这些测试拦下,**不要**调整测试期望"让它过"。
+- 涉及 EPUB 构建的改动,提示用户做真机验证。
+- 遵循「智能默认 + 高级选项」:每个自动化功能都应有手动覆盖入口。
+  - **v2 起更激进**:默认 = "不动用户文本"(`CleaningConfig::default()` 全关、
+    `WatermarkConfig::suspect_threshold = 0.42` 让单特征不再触发)。用户必须主动
+    开启策略 / 接受候选才生效。新功能应继承这种"用户优先"的默认哲学。
+- **LLM 不得变为强依赖**(CLAUDE.md 第三节第 4 条):核心库的 LLM 客户端是 trait,
+  未配 API key 时塞 `NoopLlmClient`,所有依赖 LLM 的功能(灰区仲裁 / 规则回流 /
+  元数据抓取)都必须可降级到"无 LLM 路径"。
+- **用户决策语义**(阶段三 v2.2 起):决策仅本次会话有效(`UserDecision` 不持久化);
+  持久化版本是规则回流——**只在阶段四做**——把 reject 模式抽象为
+  `RuleKind::Watermark` 规则 + `source: LlmGenerated`,存回 `RuleSet.json`。
+- 提交信息和注释使用中文或英文均可,保持与现有代码一致。
+- **不动阶段二骨架**:`VirtualText` / `OverviewRuler` / `ActivityBar` / `Sidebar` /
+  四阶段切换的核心交互。阶段三 v2 末尾这些组件已稳定,阶段四的新功能(封面预览 /
+  CSS 编辑等)应该作为 Stage4 / 新设置面板的**内部组件**实现,不动外壳。
