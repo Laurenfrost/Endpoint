@@ -91,6 +91,12 @@ export const setLlmConfig = (baseUrl, model, apiKey) =>
 /// 返回 `{ title?, author?, description?, cover_keywords? }` 或 `null`(未配置 LLM / 无法推断)。
 export const suggestMetadata = () => invoke("suggest_metadata");
 
+/// 4.7:向 LLM 提交 suspect 候选行,裁定为水印则升级到 auto。
+/// spans = [{ start, end }](字节偏移)。
+/// 返回 `{ updated_watermarks, new_cleaning }` 或抛错。
+export const adjudicateWatermarks = (spans) =>
+  invoke("adjudicate_watermarks", { spans });
+
 /// 监听后台进度事件。payload 形状:
 ///   { task_id, stage, percent, detail }
 ///   stage ∈ "decoding" | "cleaning" | "chapter" | "watermark" | "epub" | "kepubify"

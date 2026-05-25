@@ -4,29 +4,24 @@
 $fontsDir = "$PSScriptRoot\..\src-tauri\resources\fonts"
 New-Item -ItemType Directory -Force $fontsDir | Out-Null
 
-# ── 霞鹜文楷 Regular（必须，约 16 MB）──
-$lxgwPath = "$fontsDir\LXGWWenKai-Regular.ttf"
-if (Test-Path $lxgwPath) {
-    Write-Host "已存在: LXGWWenKai-Regular.ttf，跳过。"
-} else {
-    Write-Host "下载 LXGWWenKai-Regular.ttf ..."
-    Invoke-WebRequest `
-        -Uri "https://github.com/lxgw/LxgwWenKai/releases/download/v1.522/LXGWWenKai-Regular.ttf" `
-        -OutFile $lxgwPath
-    Write-Host "完成: $lxgwPath"
-}
-
-# ── 思源宋体 CN Regular（可选，约 22 MB，取消注释以下几行以启用）──
-# $sansPath = "$fontsDir\SourceHanSerifCN-Regular.otf"
-# if (Test-Path $sansPath) {
-#     Write-Host "已存在: SourceHanSerifCN-Regular.otf，跳过。"
+# $lxgwPath = "$fontsDir\LXGWWenKai-Regular.ttf"
+# if (Test-Path $lxgwPath) {
+#     Write-Host "LXGWWenKai-Regular.ttf already exists. Skip."
 # } else {
-#     Write-Host "下载 SourceHanSerifCN-Regular.otf ..."
+#     Write-Host "Downloading..."
 #     Invoke-WebRequest `
-#         -Uri "https://github.com/adobe-fonts/source-han-serif/releases/latest/download/SourceHanSerifCN.zip" `
-#         -OutFile "$fontsDir\SourceHanSerifCN.zip"
-#     # 需要解压后复制 Regular 字重
-#     Write-Host "请手动从压缩包中提取 SourceHanSerifCN-Regular.otf"
+#         -Uri "https://github.com/lxgw/LxgwWenKai/releases/download/v1.522/LXGWWenKai-Regular.ttf" `
+#         -OutFile $lxgwPath
+#     Write-Host "Complete: $lxgwPath"
 # }
 
-Write-Host "字体资源准备完毕。"
+$sansPath = "$fontsDir\SourceHanSerifCN-Regular.otf"
+if (Test-Path $sansPath) {
+    Write-Host "SourceHanSerifCN-Regular.otf already exists. Skip."
+} else {
+    Write-Host "Downloading..."
+    Invoke-WebRequest `
+        -Uri "https://github.com/adobe-fonts/source-han-serif/releases/latest/download/SourceHanSerifCN.zip" `
+        -OutFile "$fontsDir\SourceHanSerifCN.zip"
+    Write-Host "Please unzip it manually."
+}

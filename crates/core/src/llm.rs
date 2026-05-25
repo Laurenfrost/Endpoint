@@ -36,8 +36,8 @@ pub struct WatermarkCandidate {
 /// LLM 对单条水印候选的裁定结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdjudicationVerdict {
-    /// LLM 判定为水印,应当删除。
-    IsWatermark,
+    /// LLM 判定为水印,应当删除。附带理由供前端 signal 展示。
+    IsWatermark { reason: String },
     /// LLM 判定为正文,应当保留。
     IsContent,
     /// LLM 无法确定,保留候选等待用户手动决策。

@@ -82,8 +82,10 @@ impl LlmClient for OpenAiCompatibleClient {
             .join("\n");
 
         let system = "你是中文网络小说电子书制作助手。判断以下各行是否为水印/推广内容。\
-            对每一行输出「水印」或「正文」或「不确定」,格式严格如下(每行一个数字加判断):\n\
-            1. 水印\n2. 正文\n以此类推。";
+            对每一行输出判断和一句简短理由,格式:\n\
+            1. 水印: 含推广链接\n\
+            2. 正文: 正常情节描写\n\
+            3. 不确定: 无法判断\n以此类推。";
         let user = format!("请判断以下各行:\n{numbered}");
 
         let raw = self.chat(system, &user)?;
@@ -93,9 +95,23 @@ impl LlmClient for OpenAiCompatibleClient {
             .filter(|l| !l.trim().is_empty())
             .take(candidates.len())
             .map(|line| {
-                if line.contains("水印") {
-                    AdjudicationVerdict::IsWatermark
-                } else if line.contains("正文") {
+                // Strip leading "N. " numbering
+                let content = line.splitn(2, ". ").nth(1).unwrap_or(line).trim();
+                let (verdict_word, reason) = if let Some(idx) = content.find(':') {
+                    let v = content[..idx].trim();
+                    let r = content[idx + 1..].trim();
+                    (v, r.to_string())
+                } else {
+                    (content, String::new())
+                };
+                if verdict_word.contains("水印") {
+                    let detail = if reason.is_empty() {
+                        "LLM 判定为水印".to_string()
+                    } else {
+                        reason
+                    };
+                    AdjudicationVerdict::IsWatermark { reason: detail }
+                } else if verdict_word.contains("正文") {
                     AdjudicationVerdict::IsContent
                 } else {
                     AdjudicationVerdict::Uncertain

@@ -19,7 +19,8 @@
   } from "../stores/annotations.svelte.js";
   import { setBusy } from "../stores/progress.svelte.js";
   import { setPipeline } from "../stores/pipeline.svelte.js";
-  import { loadAndAnalyze } from "../ipc.js";
+  import { loadAndAnalyze, adjudicateWatermarks } from "../ipc.js";
+  import { llm } from "../stores/llm.svelte.js";
   import {
     decisions,
     getDecision,
@@ -311,6 +312,60 @@
   function formatScore(s) {
     return (s * 100).toFixed(0) + "%";
   }
+
+  // —— 4.7 LLM 水印仲裁 ——
+  let adjudicating = $state(false);
+  let adjudicateError = $state("");
+  // 单卡片正在仲裁的 span key("start-end")
+  let adjudicatingSpan = $state("");
+
+  /** 把后端返回的仲裁结果写回 pipeline.dto(原地 patch,Svelte 5 深层响应) */
+  function applyAdjudicationResult(result) {
+    if (!result || !pipeline.dto) return;
+    for (const uw of result.updated_watermarks ?? []) {
+      const idx = pipeline.dto.watermark.findIndex(
+        (w) => w.span.start === uw.span.start && w.span.end === uw.span.end
+      );
+      if (idx >= 0) pipeline.dto.watermark[idx] = uw;
+    }
+    for (const nc of result.new_cleaning ?? []) {
+      // 按 span.start 升序插入
+      let pos = pipeline.dto.cleaning.findIndex((c) => c.span.start > nc.span.start);
+      if (pos === -1) pos = pipeline.dto.cleaning.length;
+      pipeline.dto.cleaning.splice(pos, 0, nc);
+    }
+  }
+
+  /** 批量仲裁:取当前 suspect 列表全部 span */
+  async function onAdjudicateAll() {
+    const suspects = watermarkItems.filter((w) => w.verdict === "suspect");
+    if (suspects.length === 0) return;
+    adjudicating = true;
+    adjudicateError = "";
+    try {
+      const result = await adjudicateWatermarks(suspects.map((w) => w.span));
+      applyAdjudicationResult(result);
+    } catch (e) {
+      adjudicateError = String(e);
+    } finally {
+      adjudicating = false;
+    }
+  }
+
+  /** 单条仲裁:只提交这一条 */
+  async function onAdjudicateOne(span) {
+    const key = `${span.start}-${span.end}`;
+    adjudicatingSpan = key;
+    adjudicateError = "";
+    try {
+      const result = await adjudicateWatermarks([span]);
+      applyAdjudicationResult(result);
+    } catch (e) {
+      adjudicateError = String(e);
+    } finally {
+      adjudicatingSpan = "";
+    }
+  }
 </script>
 
 <div class="panel">
@@ -482,7 +537,17 @@
           <button class="tab" class:on={wmTab === "suspect"} onclick={() => (wmTab = "suspect")}>
             <span class="dot dot-yellow"></span>灰区 <small>{wmCounts.suspect}</small>
           </button>
+          {#if llm.configured && wmCounts.suspect > 0}
+            <button
+              class="tab adj-batch"
+              disabled={adjudicating}
+              onclick={onAdjudicateAll}
+              title="把所有灰区候选批量发给 LLM 仲裁"
+              type="button"
+            >{adjudicating ? "仲裁中…" : "询问 LLM ▸"}</button>
+          {/if}
         </div>
+        {#if adjudicateError}<p class="err adj-err">{adjudicateError}</p>{/if}
 
         {#if wmFiltered.length === 0}
           <p class="hint">当前 tab 下无数据。</p>
@@ -514,6 +579,16 @@
                     <span class="score">分 {formatScore(w.score)}</span>
                     <span class="offset">[{w.span.start}–{w.span.end}]</span>
                     <span class="dec-actions" role="presentation" onclick={(e) => e.stopPropagation()}>
+                      {#if llm.configured && w.verdict === "suspect"}
+                        {@const spanKey = `${w.span.start}-${w.span.end}`}
+                        <button
+                          class="dec-btn adj-one"
+                          disabled={adjudicatingSpan === spanKey || adjudicating}
+                          onclick={() => onAdjudicateOne(w.span)}
+                          title="询问 LLM 判断这行是否为水印"
+                          type="button"
+                        >{adjudicatingSpan === spanKey ? "…" : "?"}</button>
+                      {/if}
                       <button
                         class="dec-btn dec-approve"
                         class:on={d === "approved"}
@@ -889,4 +964,25 @@
   }
   /* 让支持决策的"卡片 div"看起来仍像可点按钮 */
   .item.has-decision-actions { user-select: none; }
+
+  /* 4.7 LLM 仲裁按钮 */
+  .tab.adj-batch {
+    margin-left: auto;
+    background: #ede9fe;
+    border-color: #c4b5fd;
+    color: #6d28d9;
+  }
+  .tab.adj-batch:hover:not(:disabled) { background: #ddd6fe; }
+  .tab.adj-batch:disabled { opacity: 0.55; cursor: not-allowed; }
+
+  .dec-btn.adj-one {
+    color: #6d28d9;
+    border-color: #c4b5fd;
+    font-size: 10px;
+    width: 18px;
+  }
+  .dec-btn.adj-one:hover:not(:disabled) { background: #ede9fe; }
+  .dec-btn.adj-one:disabled { opacity: 0.55; cursor: not-allowed; }
+
+  .adj-err { margin: 4px 0 0 0; font-size: 10px; }
 </style>

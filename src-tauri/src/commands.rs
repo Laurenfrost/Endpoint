@@ -29,6 +29,10 @@ use endpoint_core::{
     build_epub_from, convert as core_convert, run_pipeline, ConvertOptions, Metadata,
     PipelineOutput, ProgressSink,
 };
+use endpoint_core::domain::{
+    CleaningAnnotation, CleaningKind, WatermarkSignal, WatermarkSignalKind, WatermarkVerdict,
+};
+use endpoint_core::llm::AdjudicationVerdict;
 use serde::Serialize;
 use tauri::{async_runtime, AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
@@ -644,6 +648,170 @@ pub async fn suggest_metadata(state: State<'_, AppState>) -> Result<serde_json::
         Err(LlmError::NotConfigured) => Ok(serde_json::Value::Null),
         Err(e) => Err(format!("LLM 调用失败: {e}")),
     }
+}
+
+// ============== 阶段四 4.7:LLM 水印仲裁 ==============
+
+/// 获取 span 前后各一行的上下文(跳过空行)。
+fn watermark_context(source: &str, start: usize, end: usize) -> (Option<String>, Option<String>) {
+    let before = &source[..start.min(source.len())];
+    let ctx_before = before
+        .rsplit('\n')
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .map(|l| l.to_string());
+
+    let end_clamped = end.min(source.len());
+    let after = &source[end_clamped..];
+    let ctx_after = after
+        .split('\n')
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .map(|l| l.to_string());
+
+    (ctx_before, ctx_after)
+}
+
+/// 向 LLM 提交一组 suspect 水印候选行,根据裁定结果将 `IsWatermark` 的 verdict 升级为 `Auto`。
+///
+/// 输入 `spans`:`[{ start: usize, end: usize }]`(字节偏移,与 `WatermarkAnnotation.span` 对齐)。
+/// 仅处理 `verdict == "suspect"` 的条目;`auto` 条目传入会被跳过。
+///
+/// 返回 `{ updated_watermarks, new_cleaning }`:
+/// - `updated_watermarks`:verdict 已变为 `auto` 的 `WatermarkAnnotation` JSON 列表。
+/// - `new_cleaning`:对应新增的 `CleaningAnnotation` JSON 列表(前端需插入 pipeline.cleaning)。
+///
+/// `LlmError::NotConfigured` 转 `Err` 并带友好提示。
+#[tauri::command]
+pub async fn adjudicate_watermarks(
+    state: State<'_, AppState>,
+    spans: Vec<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    if spans.is_empty() {
+        return Ok(serde_json::json!({ "updated_watermarks": [], "new_cleaning": [] }));
+    }
+
+    // 解析 spans
+    let target_spans: Vec<(usize, usize)> = spans
+        .iter()
+        .filter_map(|v| {
+            let start = v["start"].as_u64()? as usize;
+            let end = v["end"].as_u64()? as usize;
+            Some((start, end))
+        })
+        .collect();
+
+    // 从缓存取候选
+    let (candidates, candidate_wm_indices) = {
+        let guard = state
+            .pipeline
+            .lock()
+            .map_err(|e| format!("pipeline 锁中毒: {e}"))?;
+        let cached = guard
+            .as_ref()
+            .ok_or_else(|| "尚未加载文件,请先调用 load_and_analyze".to_string())?;
+        let source = &cached.output.source_text;
+        let watermarks = &cached.output.watermark;
+
+        let mut candidates = Vec::new();
+        let mut indices = Vec::new();
+
+        for (start, end) in &target_spans {
+            if let Some(idx) = watermarks.iter().position(|w| {
+                w.span.start == *start
+                    && w.span.end == *end
+                    && w.verdict == WatermarkVerdict::Suspect
+            }) {
+                let line_text = source
+                    .get(*start..*end)
+                    .unwrap_or("")
+                    .trim_end_matches('\n')
+                    .trim_end_matches('\r')
+                    .to_string();
+                let (ctx_before, ctx_after) = watermark_context(source, *start, *end);
+                candidates.push(endpoint_core::llm::WatermarkCandidate {
+                    text: line_text,
+                    context_before: ctx_before,
+                    context_after: ctx_after,
+                });
+                indices.push(idx);
+            }
+        }
+        (candidates, indices)
+    };
+
+    if candidates.is_empty() {
+        return Ok(serde_json::json!({ "updated_watermarks": [], "new_cleaning": [] }));
+    }
+
+    // 调 LLM(持锁,阻塞可控;个人工具可接受)
+    use endpoint_core::llm::LlmError;
+    let verdicts = {
+        let guard = state
+            .llm_client
+            .lock()
+            .map_err(|e| format!("llm_client 锁中毒: {e}"))?;
+        match guard.arbitrate_watermark(&candidates) {
+            Ok(v) => v,
+            Err(LlmError::NotConfigured) => {
+                return Err("LLM 未配置,请在阶段 4 的 LLM 设置中填写 API key".to_string());
+            }
+            Err(e) => return Err(format!("LLM 调用失败: {e}")),
+        }
+    };
+
+    // 把 IsWatermark 的条目升级 + 写回缓存
+    let mut updated_watermarks_json: Vec<serde_json::Value> = Vec::new();
+    let mut new_cleaning_json: Vec<serde_json::Value> = Vec::new();
+
+    {
+        let mut guard = state
+            .pipeline
+            .lock()
+            .map_err(|e| format!("pipeline 锁中毒: {e}"))?;
+        let cached = guard
+            .as_mut()
+            .ok_or_else(|| "pipeline 缓存已失效".to_string())?;
+        let watermarks = &mut cached.output.watermark;
+        let cleaning = &mut cached.output.cleaning;
+
+        for (wm_idx, verdict) in candidate_wm_indices.iter().zip(verdicts.iter()) {
+            if let AdjudicationVerdict::IsWatermark { reason } = verdict {
+                let wm = &mut watermarks[*wm_idx];
+                wm.verdict = WatermarkVerdict::Auto;
+                wm.signals.push(WatermarkSignal {
+                    kind: WatermarkSignalKind::LlmAdjudication,
+                    score: 1.0,
+                    detail: Some(reason.clone()),
+                });
+
+                // 序列化供前端使用
+                updated_watermarks_json.push(
+                    serde_json::to_value(&*wm)
+                        .map_err(|e| format!("序列化水印标注失败: {e}"))?,
+                );
+
+                // 新增 cleaning 镜像条目(纯删除,replacement=None)
+                let new_ann = CleaningAnnotation {
+                    span: wm.span,
+                    kind: CleaningKind::WatermarkKeyword,
+                    replacement: None,
+                };
+                new_cleaning_json.push(
+                    serde_json::to_value(&new_ann)
+                        .map_err(|e| format!("序列化清洗标注失败: {e}"))?,
+                );
+                // 按 span.start 升序插入
+                let pos = cleaning.partition_point(|c| c.span.start <= new_ann.span.start);
+                cleaning.insert(pos, new_ann);
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "updated_watermarks": updated_watermarks_json,
+        "new_cleaning": new_cleaning_json,
+    }))
 }
 
 // ============== 阶段零兼容入口(回归保险,前端不再调用) ==============
