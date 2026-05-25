@@ -3,9 +3,9 @@
 //! 阶段一对应 CLAUDE.md 第六节的前两阶段:
 //! 1. **候选行扫描**:用 [`rules::RuleSet`] 中的章节/卷规则逐行匹配,叠加结构约束。
 //! 2. **层级归属**:把候选组织成卷章两级,每章归属前面最近的卷;卷之前的章(楔子/序章)挂书根。
+//! 3. **超长区间检测**(阶段四 4.4):按中位数启发式找遗漏标题,本地、无 LLM。
 //!
-//! 阶段三(超长区间检测)、阶段四(LLM 兜底)不在本阶段实现。整本未识别任何标题时
-//! 沿用阶段零的「单章 Fallback」兜底。
+//! 整本未识别任何标题时沿用阶段零的「单章 Fallback」兜底。
 //!
 //! # 阶段三签名拆分(`docs/stage3-design.md` 第五节 5.2.a 决议)
 //!
@@ -187,7 +187,10 @@ pub fn parse(source: &str, rules: &RuleSet, metadata: Metadata) -> Result<Book, 
         entries.push(BookEntry::Volume(v));
     }
 
-    Ok(Book { metadata, entries })
+    // 第三阶段:超长章节检测——用中位数启发式寻找遗漏的内嵌标题,本地、无 LLM。
+    let mut book = Book { metadata, entries };
+    detect_oversized_chapters(&mut book, source, rules, 2.5);
+    Ok(book)
 }
 
 /// 把段落物化到 [`Book`] 上,填充每个 [`Chapter::paragraphs`]。
@@ -295,6 +298,174 @@ fn fallback_book(source: &str, metadata: Metadata) -> Book {
         matched_rule_id: None,
     })];
     Book { metadata, entries }
+}
+
+// ── 阶段四 4.4:超长章节检测 ─────────────────────────────────────────────────
+
+/// 在每个超长章节的 body 内寻找遗漏的标题行,就地拆分。
+///
+/// 判定阈值:所有章节字符数的中位数 × `median_factor`(默认 2.5)。
+/// 拆出的子章节 origin 标记为 [`ChapterOrigin::Structural`]。
+///
+/// 条件不满足时(章节数 < 2,或中位数为 0)静默返回,不修改 book。
+fn detect_oversized_chapters(book: &mut Book, source: &str, rules: &RuleSet, median_factor: f32) {
+    // 收集所有章节的 body 字符数
+    let mut char_counts: Vec<usize> = Vec::new();
+    for entry in &book.entries {
+        match entry {
+            BookEntry::Chapter(c) => {
+                char_counts.push(source[c.body_span.start..c.body_span.end].chars().count());
+            }
+            BookEntry::Volume(v) => {
+                for c in &v.chapters {
+                    char_counts.push(source[c.body_span.start..c.body_span.end].chars().count());
+                }
+            }
+        }
+    }
+    // 少于 2 章时中位数无意义
+    if char_counts.len() < 2 {
+        return;
+    }
+    let median = compute_median(&mut char_counts);
+    if median == 0 {
+        return;
+    }
+    let threshold = (median as f32 * median_factor) as usize;
+
+    let chapter_rules = compile_rules(rules, RuleKind::Chapter).unwrap_or_default();
+
+    let old_entries = std::mem::take(&mut book.entries);
+    let mut new_entries = Vec::with_capacity(old_entries.len());
+
+    for entry in old_entries {
+        match entry {
+            BookEntry::Chapter(c) => {
+                let len = source[c.body_span.start..c.body_span.end].chars().count();
+                if len > threshold {
+                    let split = split_oversized_chapter(c, source, &chapter_rules);
+                    new_entries.extend(split.into_iter().map(BookEntry::Chapter));
+                } else {
+                    new_entries.push(BookEntry::Chapter(c));
+                }
+            }
+            BookEntry::Volume(v) => {
+                let mut new_chapters = Vec::with_capacity(v.chapters.len());
+                for c in v.chapters {
+                    let len = source[c.body_span.start..c.body_span.end].chars().count();
+                    if len > threshold {
+                        new_chapters.extend(split_oversized_chapter(c, source, &chapter_rules));
+                    } else {
+                        new_chapters.push(c);
+                    }
+                }
+                new_entries.push(BookEntry::Volume(Volume {
+                    title: v.title,
+                    chapters: new_chapters,
+                    heading_span: v.heading_span,
+                    origin: v.origin,
+                    matched_rule_id: v.matched_rule_id,
+                }));
+            }
+        }
+    }
+    book.entries = new_entries;
+}
+
+/// 在章节 body 内找空行包围的短行(≤ 30 字)或命中章节规则的行,按这些行拆分。
+/// 找不到拆分点时返回只含原章节的 `Vec`。
+fn split_oversized_chapter(
+    chapter: Chapter,
+    source: &str,
+    chapter_rules: &[(String, Regex)],
+) -> Vec<Chapter> {
+    let body_start = chapter.body_span.start;
+    let body_end = chapter.body_span.end;
+    if body_start >= body_end {
+        return vec![chapter];
+    }
+    let body = &source[body_start..body_end];
+    let lines = iter_lines(body);
+    let n = lines.len();
+
+    // 候选拆分点:(body 内 line_start, body 内 line_end, 标题文本)
+    let mut splits: Vec<(usize, usize, String)> = Vec::new();
+
+    for i in 0..n {
+        let (ls, le) = lines[i];
+        let trimmed = body[ls..le].trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // 超过 30 字则不是标题候选
+        if trimmed.chars().count() > 30 {
+            continue;
+        }
+        // 两侧是否为空行(或 body 边界)
+        let prev_blank = i == 0 || body[lines[i - 1].0..lines[i - 1].1].trim().is_empty();
+        let next_blank = i + 1 >= n || body[lines[i + 1].0..lines[i + 1].1].trim().is_empty();
+        // 命中章节规则
+        let rule_match = chapter_rules.iter().any(|(_, re)| re.is_match(trimmed));
+
+        if (prev_blank && next_blank) || rule_match {
+            splits.push((ls, le, trimmed.to_string()));
+        }
+    }
+
+    if splits.is_empty() {
+        return vec![chapter];
+    }
+
+    let mut result: Vec<Chapter> = Vec::with_capacity(splits.len() + 1);
+
+    // 第一段:原始标题行 + 第一个拆分点之前的 body
+    let first_body_end = body_start + splits[0].0;
+    result.push(Chapter {
+        title: chapter.title.clone(),
+        paragraphs: Vec::new(),
+        heading_span: chapter.heading_span,
+        body_span: Span::new(chapter.body_span.start, first_body_end),
+        origin: chapter.origin,
+        matched_rule_id: chapter.matched_rule_id.clone(),
+    });
+
+    // 后续每段:以找到的标题行为 heading,body 到下一个拆分点(或 body 末尾)
+    for j in 0..splits.len() {
+        let (sp_start, sp_end, ref title) = splits[j];
+        let heading_start = body_start + sp_start;
+        let heading_end = body_start + sp_end;
+        // body 从该标题行后的第一行起
+        let sub_body_start = body_start + next_byte_after_line(body, sp_end);
+        let sub_body_end = if j + 1 < splits.len() {
+            body_start + splits[j + 1].0
+        } else {
+            body_end
+        };
+        result.push(Chapter {
+            title: title.clone(),
+            paragraphs: Vec::new(),
+            heading_span: Span::new(heading_start, heading_end),
+            body_span: Span::new(sub_body_start.min(sub_body_end), sub_body_end),
+            origin: ChapterOrigin::Structural,
+            matched_rule_id: None,
+        });
+    }
+
+    result
+}
+
+/// 中位数:对离群值稳健,优于平均值。偶数个元素取中间两者的平均(整数除法)。
+fn compute_median(vals: &mut Vec<usize>) -> usize {
+    if vals.is_empty() {
+        return 0;
+    }
+    vals.sort_unstable();
+    let n = vals.len();
+    if n % 2 == 1 {
+        vals[n / 2]
+    } else {
+        (vals[n / 2 - 1] + vals[n / 2]) / 2
+    }
 }
 
 fn iter_lines(text: &str) -> Vec<(usize, usize)> {
@@ -519,6 +690,65 @@ mod tests {
                 assert_eq!(v.chapters[0].title, "第一章");
             }
             _ => panic!(),
+        }
+    }
+
+    // ── 阶段四 4.4 测试 ──────────────────────────────────────────────────────
+
+    /// 超长章节内的「空行包围短行」被识别为拆分点,拆出的子章 origin = Structural。
+    #[test]
+    fn oversized_chapter_split_at_structural_headings() {
+        // 5 个普通章节,body 各约 52 字
+        let normal_body = "正文内容\n".repeat(13); // 13 × 4 chars = 52 chars
+        // 1 个超长章节:含两个「空行包围的短行」作为结构标题,共约 164 chars
+        let section = "正文内容\n".repeat(13);
+        let giant_body = format!("{section}\n独立小节\n\n{section}\n又一小节\n\n{section}");
+
+        let text = format!(
+            "第一章 一\n{normal_body}\n\
+             第二章 二\n{normal_body}\n\
+             第三章 三\n{normal_body}\n\
+             第四章 四\n{normal_body}\n\
+             第五章 五（超长）\n{giant_body}"
+        );
+
+        let book = parse(&text, &RuleSet::builtin(), Metadata::new("测试", "作者")).unwrap();
+
+        // 超长章被拆成 3 段:第五章 + 独立小节 + 又一小节
+        let mut found_structural = 0usize;
+        let mut found_title = false;
+        for entry in &book.entries {
+            if let BookEntry::Chapter(c) = entry {
+                if c.origin == ChapterOrigin::Structural {
+                    found_structural += 1;
+                }
+                if c.title == "独立小节" || c.title == "又一小节" {
+                    found_title = true;
+                }
+            }
+        }
+        assert!(found_structural >= 2, "应当至少拆出 2 个 Structural 子章,实际 {found_structural}");
+        assert!(found_title, "应当在 entries 中找到拆分出的子章标题");
+    }
+
+    /// 所有章节长度相近时,不应发生任何拆分。
+    #[test]
+    fn normal_chapters_are_not_split() {
+        let body = "正文内容\n".repeat(20); // 均匀,不存在离群值
+        let text = format!(
+            "第一章 一\n{body}第二章 二\n{body}第三章 三\n{body}第四章 四\n{body}"
+        );
+        let book = parse(&text, &RuleSet::builtin(), Metadata::new("测试", "作者")).unwrap();
+        // 4 个章节,无一被拆分
+        assert_eq!(book.entries.len(), 4, "均匀章节不应被拆分,实际 entries = {}", book.entries.len());
+        for e in &book.entries {
+            if let BookEntry::Chapter(c) = e {
+                assert_ne!(
+                    c.origin,
+                    ChapterOrigin::Structural,
+                    "均匀章节不应出现 Structural origin"
+                );
+            }
         }
     }
 
