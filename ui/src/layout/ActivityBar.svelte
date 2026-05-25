@@ -3,6 +3,8 @@
   import { stage, setStage, STAGE_DEFS } from "../stores/stage.svelte.js";
   import { pipeline } from "../stores/pipeline.svelte.js";
 
+  import { llm } from "../stores/llm.svelte.js";
+
   // 阶段 2-4 需要先加载 pipeline 才能访问。
   const stageEnabled = (id) => id === 1 || !!pipeline.dto;
 </script>
@@ -23,6 +25,10 @@
       <span class="badge">{def.id}</span>
     </button>
   {/each}
+  <div class="spacer"></div>
+  <div class="llm-status" title={llm.configured ? `LLM 已配置: ${llm.model || llm.baseUrl}` : "LLM 未配置"}>
+    <span class="llm-dot" class:on={llm.configured}></span>
+  </div>
 </nav>
 
 <style>
@@ -60,4 +66,20 @@
     opacity: 0.6;
     font-family: Consolas, "Cascadia Mono", monospace;
   }
+  .spacer { flex: 1; }
+  .llm-status {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 10px 0;
+    cursor: default;
+  }
+  .llm-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #52606d;
+    transition: background 0.2s;
+  }
+  .llm-dot.on { background: #4caf50; }
 </style>

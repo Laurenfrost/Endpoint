@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex};
 
 use endpoint_core::PipelineOutput;
 
-#[derive(Default)]
 pub struct AppState {
     /// 最近一次 `load_and_analyze` 的结果。reload 时整体替换。
     /// 体积可达数 MB(source_text + paragraphs),但只持一份,内存压力可控。
@@ -25,6 +24,21 @@ pub struct AppState {
     pub cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// 任务 id 单调计数器。
     counter: AtomicU64,
+    /// 当前生效的 LLM 客户端。初始化时从 `config.toml` 加载;`set_llm_config` 命令可替换。
+    /// `NoopLlmClient` 表示未配置。
+    pub llm_client: Mutex<Box<dyn endpoint_core::llm::LlmClient>>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        let cfg = crate::llm_config::load();
+        Self {
+            pipeline: Mutex::new(None),
+            cancel_flags: Mutex::new(HashMap::new()),
+            counter: AtomicU64::new(0),
+            llm_client: Mutex::new(crate::llm_config::create_client(&cfg)),
+        }
+    }
 }
 
 pub struct CachedPipeline {

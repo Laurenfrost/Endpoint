@@ -31,19 +31,23 @@
   } from "../stores/decisions.svelte.js";
   import { onDestroy } from "svelte";
 
-  // v2 起 8 项 CleaningKind 的中文 label
+  // v2 起 8 项 CleaningKind 的中文 label;watermark_* 三项来自 auto 镜像
   const KIND_LABEL = {
     blank_line_compression: "空行压缩",
     leading_fullwidth_space: "段首全角缩进",
     inline_fullwidth_space: "行内全角连排",
     control_char: "控制字符",
     trailing_whitespace: "行尾空白",
+    watermark_keyword: "水印:关键词",
+    watermark_repetition: "水印:重复",
+    watermark_non_cjk: "水印:非中文",
   };
 
   const SIGNAL_LABEL = {
     repetition: "行频",
     non_cjk_ratio: "非中文",
     keyword_regex: "关键词",
+    llm_adjudication: "LLM 仲裁",
   };
 
   // —— v2 清洗策略面板 ——

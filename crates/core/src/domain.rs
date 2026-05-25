@@ -314,7 +314,7 @@ pub struct WatermarkSignal {
 }
 
 /// 水印特征类型。`#[serde(rename_all = "snake_case")]` 让前端拿到
-/// `"repetition"` / `"non_cjk_ratio"` / `"keyword_regex"`。
+/// `"repetition"` / `"non_cjk_ratio"` / `"keyword_regex"` / `"llm_adjudication"`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WatermarkSignalKind {
@@ -324,6 +324,8 @@ pub enum WatermarkSignalKind {
     NonCjkRatio,
     /// 命中 [`crate::rules::RuleKind::Watermark`] 类规则。
     KeywordRegex,
+    /// 阶段四 4.7 新增:LLM 判定(语义层仲裁结果)。
+    LlmAdjudication,
 }
 
 /// **阶段三 v2.2 新增**:用户对自动检测结果的覆盖决策。

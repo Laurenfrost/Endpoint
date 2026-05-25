@@ -28,6 +28,7 @@ pub mod domain;
 pub mod encoding;
 pub mod epub;
 pub mod kepubify;
+pub mod llm;
 pub mod rules;
 pub mod watermark;
 

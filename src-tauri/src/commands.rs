@@ -539,6 +539,62 @@ pub async fn generate_text_cover(
     }))
 }
 
+// ============== 阶段四 4.5:LLM 配置 ==============
+
+/// 读取当前 LLM 配置。返回 `{ base_url, model, key_set, key_masked }`。
+/// `key_set`:API key 是否已填写(bool)。`key_masked`:脱敏显示(如 `"sk-...abc"`),
+/// 供前端"已保存"状态展示使用。
+#[tauri::command]
+pub async fn get_llm_config(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let cfg = crate::llm_config::load();
+    let key_set = !cfg.api_key.is_empty();
+    let key_masked = if key_set {
+        let k = &cfg.api_key;
+        if k.len() > 8 {
+            format!("{}...{}", &k[..4], &k[k.len() - 4..])
+        } else {
+            "***".to_string()
+        }
+    } else {
+        String::new()
+    };
+    // 验证 llm_client 锁存活(不消费锁内容)
+    let _guard = state
+        .llm_client
+        .lock()
+        .map_err(|e| format!("llm_client 锁中毒: {e}"))?;
+    drop(_guard);
+    Ok(serde_json::json!({
+        "base_url": cfg.base_url,
+        "model": cfg.model,
+        "key_set": key_set,
+        "key_masked": key_masked,
+    }))
+}
+
+/// 保存 LLM 配置到 `config.toml`,并立即以新配置重建客户端。
+/// `api_key` 传空字符串表示清除 key(退化到 `NoopLlmClient`)。
+#[tauri::command]
+pub async fn set_llm_config(
+    state: State<'_, AppState>,
+    base_url: String,
+    model: String,
+    api_key: String,
+) -> Result<(), String> {
+    let cfg = crate::llm_config::LlmConfig {
+        base_url: base_url.trim().to_string(),
+        model: model.trim().to_string(),
+        api_key: api_key.trim().to_string(),
+    };
+    crate::llm_config::save(&cfg)?;
+    let new_client = crate::llm_config::create_client(&cfg);
+    *state
+        .llm_client
+        .lock()
+        .map_err(|e| format!("llm_client 锁中毒: {e}"))? = new_client;
+    Ok(())
+}
+
 // ============== 阶段零兼容入口(回归保险,前端不再调用) ==============
 
 #[tauri::command]

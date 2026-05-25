@@ -80,6 +80,13 @@ export const loadTheme = (name) => invoke("load_theme", { name });
 export const generateTextCover = (title, author, style, fontPath) =>
   invoke("generate_text_cover", { title, author, style, fontPath: fontPath ?? null });
 
+/// 4.5:读取 LLM 配置。返回 `{ base_url, model, key_set, key_masked }`。
+export const getLlmConfig = () => invoke("get_llm_config");
+
+/// 4.5:保存 LLM 配置并重建客户端。api_key 传空字符串清除 key。
+export const setLlmConfig = (baseUrl, model, apiKey) =>
+  invoke("set_llm_config", { baseUrl, model, apiKey });
+
 /// 监听后台进度事件。payload 形状:
 ///   { task_id, stage, percent, detail }
 ///   stage ∈ "decoding" | "cleaning" | "chapter" | "watermark" | "epub" | "kepubify"

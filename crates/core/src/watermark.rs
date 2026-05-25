@@ -468,12 +468,15 @@ fn signals_to_cleaning_kind(signals: &[WatermarkSignal]) -> CleaningKind {
         WatermarkSignalKind::KeywordRegex => CleaningKind::WatermarkKeyword,
         WatermarkSignalKind::Repetition => CleaningKind::WatermarkRepetition,
         WatermarkSignalKind::NonCjkRatio => CleaningKind::WatermarkNonCjk,
+        // LLM 仲裁结果:按 KeywordRegex 最高优先级镜像
+        WatermarkSignalKind::LlmAdjudication => CleaningKind::WatermarkKeyword,
     }
 }
 
 fn signal_priority(k: WatermarkSignalKind) -> u8 {
     match k {
         WatermarkSignalKind::KeywordRegex => 3,
+        WatermarkSignalKind::LlmAdjudication => 3,
         WatermarkSignalKind::Repetition => 2,
         WatermarkSignalKind::NonCjkRatio => 1,
     }
@@ -516,7 +519,10 @@ fn fused_score(signals: &[WatermarkSignal], config: &WatermarkConfig) -> f32 {
         let target = match s.kind {
             WatermarkSignalKind::Repetition => &mut s_repeat,
             WatermarkSignalKind::NonCjkRatio => &mut s_non_cjk,
-            WatermarkSignalKind::KeywordRegex => &mut s_keyword,
+            // LLM 仲裁结果按最高权重(keyword)算入融合分
+            WatermarkSignalKind::KeywordRegex | WatermarkSignalKind::LlmAdjudication => {
+                &mut s_keyword
+            }
         };
         if s.score > *target {
             *target = s.score;

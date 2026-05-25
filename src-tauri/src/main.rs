@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod llm_config;
+mod openai_client;
 mod state;
 
 use state::AppState;
@@ -25,6 +27,9 @@ fn main() {
             commands::load_theme,
             // 阶段四 4.3:文字封面
             commands::generate_text_cover,
+            // 阶段四 4.5:LLM 配置
+            commands::get_llm_config,
+            commands::set_llm_config,
             // 阶段零兼容入口(回归保险)
             commands::convert,
         ])

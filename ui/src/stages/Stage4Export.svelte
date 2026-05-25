@@ -5,7 +5,9 @@
   import {
     pickOutputFile, pickExecutableFile, pickCoverFile, pickFontFile,
     buildEpub, listThemes, loadTheme, generateTextCover,
+    getLlmConfig, setLlmConfig,
   } from "../ipc.js";
+  import { llm, applyLlmConfig } from "../stores/llm.svelte.js";
   import { serializeForIpc, decisionCount } from "../stores/decisions.svelte.js";
 
   const THEME_LABELS = { standard: "标准", classic: "古风", highcontrast: "高对比度" };
@@ -30,6 +32,13 @@
   let cssText = $state("");         // textarea 内容
   let cssExpanded = $state(false);  // 高级 CSS 展开状态
   let loadingTheme = $state(false);
+  // LLM 配置
+  let llmOpen = $state(false);
+  let llmBaseUrl = $state("");
+  let llmModel = $state("");
+  let llmApiKey = $state("");
+  let llmSaving = $state(false);
+  let llmMsg = $state("");
   // 结果
   let error = $state("");
   let result = $state("");
@@ -118,6 +127,37 @@
       const p = await pickFontFile();
       if (typeof p === "string") customFontPath = p;
     } catch (e) { error = String(e); }
+  }
+
+  // 进入阶段时加载当前 LLM 配置
+  $effect(() => {
+    getLlmConfig().then(cfg => {
+      applyLlmConfig(cfg);
+      llmBaseUrl = cfg.base_url ?? "";
+      llmModel = cfg.model ?? "";
+      llmApiKey = "";  // 不预填 key,让用户重新输入
+    }).catch(() => {});
+  });
+
+  function onToggleLlm() {
+    llmOpen = !llmOpen;
+    llmMsg = "";
+  }
+
+  async function onSaveLlm() {
+    llmSaving = true;
+    llmMsg = "";
+    try {
+      await setLlmConfig(llmBaseUrl, llmModel, llmApiKey);
+      const cfg = await getLlmConfig();
+      applyLlmConfig(cfg);
+      llmMsg = llm.configured ? "✓ 已保存并连接" : "已保存(未填 API key,LLM 功能未启用)";
+      llmApiKey = "";
+    } catch (e) {
+      llmMsg = `保存失败: ${e}`;
+    } finally {
+      llmSaving = false;
+    }
   }
 
   async function onBuild() {
@@ -304,6 +344,59 @@
       {/if}
     </div>
 
+    <!-- LLM 配置 -->
+    <div class="section">
+      <div class="section-header">
+        <span class="section-title">
+          LLM 设置
+          {#if llm.configured}
+            <span class="llm-dot configured" title="已配置 LLM"></span>
+          {:else}
+            <span class="llm-dot" title="未配置 LLM"></span>
+          {/if}
+        </span>
+        <button class="link-btn" onclick={onToggleLlm}>
+          {llmOpen ? "收起 ▲" : "配置 ▼"}
+        </button>
+      </div>
+      {#if !llmOpen}
+        <p class="hint" style="margin:0">
+          {llm.configured ? `已配置(${llm.keyMasked})` : "未配置 — LLM 功能(仲裁/规则归纳/元数据建议)不可用"}
+        </p>
+      {:else}
+        <div class="inset llm-form">
+          <label>
+            <span>API 接口地址(base_url)</span>
+            <input type="text" bind:value={llmBaseUrl}
+              placeholder="https://api.deepseek.com"
+              disabled={llmSaving} />
+          </label>
+          <label>
+            <span>模型</span>
+            <input type="text" bind:value={llmModel}
+              placeholder="deepseek-chat"
+              disabled={llmSaving} />
+          </label>
+          <label>
+            <span>API Key {llm.configured ? `(当前: ${llm.keyMasked})` : ""}</span>
+            <input type="password" bind:value={llmApiKey}
+              placeholder="留空保持原 key 不变"
+              disabled={llmSaving} />
+          </label>
+          <div class="row" style="justify-content:flex-end;gap:6px;">
+            <button onclick={onSaveLlm} disabled={llmSaving}>
+              {llmSaving ? "保存中..." : "保存"}
+            </button>
+          </div>
+          {#if llmMsg}<p class="hint" style="margin:4px 0 0">{llmMsg}</p>{/if}
+          <p class="hint" style="margin:4px 0 0;color:#9aa">
+            API key 明文存储于 AppData\Endpoint\config.toml,仅限本机使用。
+            兼容 OpenAI /v1/chat/completions 协议(DeepSeek / OpenAI / 本地 Ollama)。
+          </p>
+        </div>
+      {/if}
+    </div>
+
     <!-- kepubify -->
     <label style="margin-top:4px;">
       <span>kepubify(可选)</span>
@@ -446,6 +539,18 @@
     border: 1px dashed #cbd2d9;
     border-radius: 12px;
   }
+  .llm-dot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #cbd2d9;
+    margin-left: 4px;
+    vertical-align: middle;
+  }
+  .llm-dot.configured { background: #2e7d32; }
+  .llm-form label { margin-bottom: 8px; }
+  .llm-form label span { display: block; margin-bottom: 2px; }
   .css-editor {
     display: block;
     width: 100%;
