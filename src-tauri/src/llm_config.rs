@@ -34,6 +34,11 @@ fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("Endpoint").join("config.toml"))
 }
 
+/// `%APPDATA%\Endpoint\rules.json` — LLM 归纳规则的持久化路径。
+pub fn user_rules_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("Endpoint").join("rules.json"))
+}
+
 pub fn load() -> LlmConfig {
     let Some(path) = config_path() else {
         return LlmConfig::default();

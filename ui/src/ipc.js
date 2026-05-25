@@ -97,6 +97,15 @@ export const suggestMetadata = () => invoke("suggest_metadata");
 export const adjudicateWatermarks = (spans) =>
   invoke("adjudicate_watermarks", { spans });
 
+/// 4.8:向 LLM 提交被拒绝的水印行,归纳一条正则规则。
+/// spans = [{ start, end }]。返回 Rule 对象或 null(无法归纳)。
+export const induceWatermarkRule = (spans) =>
+  invoke("induce_watermark_rule", { spans });
+
+/// 4.8:把规则对象持久化到 rules.json。
+export const saveInducedRule = (rule) =>
+  invoke("save_induced_rule", { rule });
+
 /// 监听后台进度事件。payload 形状:
 ///   { task_id, stage, percent, detail }
 ///   stage ∈ "decoding" | "cleaning" | "chapter" | "watermark" | "epub" | "kepubify"

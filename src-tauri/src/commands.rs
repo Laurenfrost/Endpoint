@@ -218,9 +218,11 @@ pub async fn load_and_analyze(
     let pipeline_result = async_runtime::spawn_blocking(move || {
         let bytes = std::fs::read(&path_for_blocking)
             .map_err(|e| format!("读取文件失败({path_for_blocking}): {e}"))?;
+        // 4.8:若用户已保存过 LLM 归纳规则,自动合并进分析(save_induced_rule 写到同目录)
+        let user_rules = crate::llm_config::user_rules_path().filter(|p| p.exists());
         let options = ConvertOptions {
             encoding_override,
-            rules_path: None,
+            rules_path: user_rules,
             kepubify_path: None,
             cancel_token: Some(cancel_flag),
             watermark: watermark_cfg,
@@ -812,6 +814,104 @@ pub async fn adjudicate_watermarks(
         "updated_watermarks": updated_watermarks_json,
         "new_cleaning": new_cleaning_json,
     }))
+}
+
+// ============== 阶段四 4.8:LLM 规则归纳 + 持久化 ==============
+
+/// 把一组被用户拒绝的水印行发给 LLM,请其归纳一条能匹配该类水印的正则规则。
+///
+/// `spans`:被拒绝行的字节偏移列表(`[{ start, end }]`)。
+/// 返回 [`Rule`] JSON 对象,或 `null`(LLM 无法归纳)。
+/// `LlmError::NotConfigured` 返回 `Err`。
+#[tauri::command]
+pub async fn induce_watermark_rule(
+    state: State<'_, AppState>,
+    spans: Vec<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    if spans.is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+
+    let rejected_lines: Vec<String> = {
+        let guard = state
+            .pipeline
+            .lock()
+            .map_err(|e| format!("pipeline 锁中毒: {e}"))?;
+        let cached = guard
+            .as_ref()
+            .ok_or_else(|| "尚未加载文件,请先调用 load_and_analyze".to_string())?;
+        let source = &cached.output.source_text;
+        spans
+            .iter()
+            .filter_map(|v| {
+                let start = v["start"].as_u64()? as usize;
+                let end = v["end"].as_u64()? as usize;
+                source
+                    .get(start..end)
+                    .map(|s| s.trim_matches(['\n', '\r']).trim().to_string())
+            })
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+
+    if rejected_lines.is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+
+    use endpoint_core::llm::LlmError;
+    let rule_opt = {
+        let guard = state
+            .llm_client
+            .lock()
+            .map_err(|e| format!("llm_client 锁中毒: {e}"))?;
+        let refs: Vec<&str> = rejected_lines.iter().map(|s| s.as_str()).collect();
+        match guard.induce_rule(&refs) {
+            Ok(r) => r,
+            Err(LlmError::NotConfigured) => {
+                return Err(
+                    "LLM 未配置,请在阶段 4 的 LLM 设置中填写 API key".to_string(),
+                );
+            }
+            Err(e) => return Err(format!("LLM 调用失败: {e}")),
+        }
+    };
+
+    match rule_opt {
+        None => Ok(serde_json::Value::Null),
+        Some(rule) => {
+            serde_json::to_value(&rule).map_err(|e| format!("序列化规则失败: {e}"))
+        }
+    }
+}
+
+/// 把前端确认的规则追加(upsert)到 `%APPDATA%\Endpoint\rules.json`。
+///
+/// 文件不存在时自动创建;存在时按 `rule.id` 替换或追加。
+/// 下次 `load_and_analyze` 会自动合并该文件。
+#[tauri::command]
+pub async fn save_induced_rule(rule: serde_json::Value) -> Result<(), String> {
+    let rule: endpoint_core::rules::Rule =
+        serde_json::from_value(rule).map_err(|e| format!("规则反序列化失败: {e}"))?;
+
+    let path = crate::llm_config::user_rules_path()
+        .ok_or_else(|| "无法获取配置目录".to_string())?;
+
+    let mut ruleset = if path.exists() {
+        endpoint_core::rules::RuleSet::load_from_json(&path)
+            .map_err(|e| format!("读取规则文件失败: {e}"))?
+    } else {
+        endpoint_core::rules::RuleSet::default()
+    };
+
+    ruleset.upsert(rule);
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {e}"))?;
+    }
+
+    ruleset
+        .save_to_json(&path)
+        .map_err(|e| format!("保存规则失败: {e}"))
 }
 
 // ============== 阶段零兼容入口(回归保险,前端不再调用) ==============

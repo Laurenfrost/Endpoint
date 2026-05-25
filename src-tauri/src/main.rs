@@ -34,6 +34,9 @@ fn main() {
             commands::suggest_metadata,
             // 阶段四 4.7:LLM 水印仲裁
             commands::adjudicate_watermarks,
+            // 阶段四 4.8:LLM 规则归纳 + 持久化
+            commands::induce_watermark_rule,
+            commands::save_induced_rule,
             // 阶段零兼容入口(回归保险)
             commands::convert,
         ])

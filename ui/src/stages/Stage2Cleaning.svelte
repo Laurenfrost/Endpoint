@@ -19,7 +19,7 @@
   } from "../stores/annotations.svelte.js";
   import { setBusy } from "../stores/progress.svelte.js";
   import { setPipeline } from "../stores/pipeline.svelte.js";
-  import { loadAndAnalyze, adjudicateWatermarks } from "../ipc.js";
+  import { loadAndAnalyze, adjudicateWatermarks, induceWatermarkRule, saveInducedRule } from "../ipc.js";
   import { llm } from "../stores/llm.svelte.js";
   import {
     decisions,
@@ -352,6 +352,64 @@
     }
   }
 
+  // —— 4.8 规则归纳 ——
+  let inducing = $state(false);
+  let inducedRule = $state(null);     // { id, pattern, description, ... } | null
+  let induceError = $state("");
+  let savingRule = $state(false);
+  let savedMsg = $state("");
+
+  /** 被用户拒绝的水印 span 列表(从 decisions.map 解析) */
+  function getRejectedWmSpans() {
+    const spans = [];
+    for (const [key, val] of Object.entries(decisions.map)) {
+      if (key.startsWith("watermark:") && val === "rejected") {
+        const raw = key.slice("watermark:".length);
+        const dash = raw.indexOf("-");
+        if (dash > 0) {
+          spans.push({ start: parseInt(raw.slice(0, dash)), end: parseInt(raw.slice(dash + 1)) });
+        }
+      }
+    }
+    return spans;
+  }
+
+  const rejectedWmCount = $derived(
+    Object.entries(decisions.map).filter(([k, v]) => k.startsWith("watermark:") && v === "rejected").length
+  );
+
+  async function onInduceRule() {
+    const spans = getRejectedWmSpans();
+    if (spans.length === 0) return;
+    inducing = true;
+    induceError = "";
+    inducedRule = null;
+    savedMsg = "";
+    try {
+      const rule = await induceWatermarkRule(spans);
+      if (rule) inducedRule = rule;
+      else induceError = "LLM 未能归纳出规则(样本可能不足或模式不明显)";
+    } catch (e) {
+      induceError = String(e);
+    } finally {
+      inducing = false;
+    }
+  }
+
+  async function onSaveRule() {
+    if (!inducedRule) return;
+    savingRule = true;
+    savedMsg = "";
+    try {
+      await saveInducedRule(inducedRule);
+      savedMsg = "规则已保存,下次重新分析将自动应用";
+    } catch (e) {
+      induceError = String(e);
+    } finally {
+      savingRule = false;
+    }
+  }
+
   /** 单条仲裁:只提交这一条 */
   async function onAdjudicateOne(span) {
     const key = `${span.start}-${span.end}`;
@@ -627,6 +685,45 @@
               再加载 {Math.min(WM_PAGE, wmFiltered.length - wmVisible)} 条
               (已显示 {wmVisible} / {wmFiltered.length})
             </button>
+          {/if}
+        {/if}
+
+        <!-- 4.8 规则归纳 -->
+        {#if llm.configured}
+          <div class="induce-bar">
+            <button
+              class="induce-btn"
+              disabled={rejectedWmCount === 0 || inducing}
+              onclick={onInduceRule}
+              title={rejectedWmCount === 0 ? "先拒绝(✗)一些灰区候选行" : `从 ${rejectedWmCount} 条拒绝行归纳规则`}
+              type="button"
+            >{inducing ? "归纳中…" : `归纳规则 ▸`}
+              {#if rejectedWmCount > 0}<small>({rejectedWmCount} 条)</small>{/if}
+            </button>
+            {#if induceError}<span class="err">{induceError}</span>{/if}
+          </div>
+
+          {#if inducedRule}
+            <div class="rule-preview">
+              <div class="rule-header">
+                <span class="rule-label">LLM 归纳规则</span>
+                <button class="rule-dismiss" onclick={() => { inducedRule = null; savedMsg = ""; }} type="button">✕</button>
+              </div>
+              <div class="rule-pattern">{inducedRule.pattern}</div>
+              {#if inducedRule.description}
+                <div class="rule-desc">{inducedRule.description}</div>
+              {/if}
+              {#if savedMsg}
+                <div class="rule-saved">{savedMsg}</div>
+              {:else}
+                <button
+                  class="rule-save-btn"
+                  disabled={savingRule}
+                  onclick={onSaveRule}
+                  type="button"
+                >{savingRule ? "保存中…" : "保存规则"}</button>
+              {/if}
+            </div>
           {/if}
         {/if}
       {/if}
@@ -985,4 +1082,92 @@
   .dec-btn.adj-one:disabled { opacity: 0.55; cursor: not-allowed; }
 
   .adj-err { margin: 4px 0 0 0; font-size: 10px; }
+
+  /* 4.8 规则归纳 */
+  .induce-bar {
+    margin-top: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-top: 1px dashed #cbd2d9;
+    padding-top: 8px;
+  }
+  .induce-btn {
+    background: #f5f0ff;
+    border: 1px solid #c4b5fd;
+    border-radius: 3px;
+    padding: 3px 10px;
+    font-size: 10px;
+    color: #6d28d9;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .induce-btn:hover:not(:disabled) { background: #ede9fe; }
+  .induce-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+  .induce-btn small { color: #8b5cf6; font-size: 9px; }
+
+  .rule-preview {
+    margin-top: 8px;
+    background: #faf5ff;
+    border: 1px solid #c4b5fd;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-size: 11px;
+  }
+  .rule-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .rule-label {
+    font-size: 10px;
+    font-weight: 600;
+    color: #6d28d9;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+  .rule-dismiss {
+    background: none;
+    border: none;
+    color: #9aa5b1;
+    cursor: pointer;
+    padding: 0;
+    font-size: 12px;
+    line-height: 1;
+  }
+  .rule-dismiss:hover { color: #52606d; }
+  .rule-pattern {
+    font-family: Consolas, monospace;
+    font-size: 10px;
+    background: #fff;
+    border: 1px solid #e4d9fc;
+    border-radius: 3px;
+    padding: 4px 6px;
+    word-break: break-all;
+    color: #1f2933;
+    margin-bottom: 4px;
+  }
+  .rule-desc {
+    font-size: 10px;
+    color: #52606d;
+    margin-bottom: 6px;
+  }
+  .rule-save-btn {
+    background: #6d28d9;
+    border: none;
+    border-radius: 3px;
+    padding: 3px 10px;
+    font-size: 10px;
+    color: #fff;
+    cursor: pointer;
+  }
+  .rule-save-btn:hover:not(:disabled) { background: #5b21b6; }
+  .rule-save-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+  .rule-saved {
+    font-size: 10px;
+    color: #2e7d32;
+  }
 </style>
