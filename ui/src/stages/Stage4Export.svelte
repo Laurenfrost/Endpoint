@@ -4,7 +4,7 @@
   import { progress, setBusy } from "../stores/progress.svelte.js";
   import {
     pickOutputFile, pickExecutableFile, pickCoverFile, pickFontFile,
-    buildEpub, listThemes, loadTheme,
+    buildEpub, listThemes, loadTheme, generateTextCover,
   } from "../ipc.js";
   import { serializeForIpc, decisionCount } from "../stores/decisions.svelte.js";
 
@@ -15,8 +15,11 @@
   let author = $state("");
   let kepubifyPath = $state("");
   // 封面
+  let coverMode = $state("none");       // "none" | "file" | "text"
   let coverPath = $state("");
   let coverDataUrl = $state("");
+  let textCoverStyle = $state("default");
+  let generatingCover = $state(false);
   // 字体
   let embedFonts = $state(false);
   let fontSource = $state("builtin");
@@ -92,6 +95,24 @@
 
   function onClearCover() { coverPath = ""; coverDataUrl = ""; }
 
+  async function onGenerateTextCover() {
+    if (!title || !author) return;
+    generatingCover = true;
+    error = "";
+    try {
+      const fontPath = embedFonts && fontSource === "custom" ? customFontPath : null;
+      const res = await generateTextCover(title, author, textCoverStyle, fontPath);
+      if (res && res.path) {
+        coverPath = res.path;
+        coverDataUrl = res.dataUrl;
+      }
+    } catch (e) {
+      error = String(e);
+    } finally {
+      generatingCover = false;
+    }
+  }
+
   async function onPickCustomFont() {
     try {
       const p = await pickFontFile();
@@ -153,20 +174,74 @@
       <input type="text" bind:value={author} disabled={progress.busy} />
     </label>
 
-    <!-- 封面图片 -->
-    <label>
-      <span>封面图片(可选)</span>
-      <div class="row">
-        <input type="text" bind:value={coverPath} readonly placeholder="留空则无封面" />
-        <button onclick={onPickCover} disabled={progress.busy}>选择</button>
-        {#if coverPath}
-          <button onclick={onClearCover} disabled={progress.busy} title="清除封面">✕</button>
-        {/if}
+    <!-- 封面 -->
+    <div class="section">
+      <div class="section-header">
+        <span class="section-title">封面(可选)</span>
       </div>
-      {#if coverDataUrl}
-        <img class="cover-preview" src={coverDataUrl} alt="封面预览" />
+      <div class="cover-mode-row">
+        <label class="radio-label">
+          <input type="radio" name="cover-mode" value="none"
+            checked={coverMode === "none"}
+            onchange={() => { coverMode = "none"; coverPath = ""; coverDataUrl = ""; }} />
+          无封面
+        </label>
+        <label class="radio-label">
+          <input type="radio" name="cover-mode" value="file"
+            checked={coverMode === "file"}
+            onchange={() => { coverMode = "file"; coverPath = ""; coverDataUrl = ""; }} />
+          图片文件
+        </label>
+        <label class="radio-label">
+          <input type="radio" name="cover-mode" value="text"
+            checked={coverMode === "text"}
+            onchange={() => { coverMode = "text"; coverPath = ""; coverDataUrl = ""; }} />
+          文字封面
+        </label>
+      </div>
+
+      {#if coverMode === "file"}
+        <div class="inset">
+          <div class="row">
+            <input type="text" bind:value={coverPath} readonly placeholder="选择图片文件" />
+            <button onclick={onPickCover} disabled={progress.busy}>选择</button>
+            {#if coverPath}
+              <button onclick={onClearCover} disabled={progress.busy} title="清除">✕</button>
+            {/if}
+          </div>
+          {#if coverDataUrl}
+            <img class="cover-preview" src={coverDataUrl} alt="封面预览" />
+          {/if}
+        </div>
+      {:else if coverMode === "text"}
+        <div class="inset">
+          <div class="row" style="align-items:center;gap:8px;flex-wrap:wrap;">
+            <label class="radio-label" style="margin:0">
+              <input type="radio" bind:group={textCoverStyle} value="default"
+                disabled={progress.busy || generatingCover} />
+              深蓝
+            </label>
+            <label class="radio-label" style="margin:0">
+              <input type="radio" bind:group={textCoverStyle} value="gradient"
+                disabled={progress.busy || generatingCover} />
+              蓝紫
+            </label>
+            <button
+              onclick={onGenerateTextCover}
+              disabled={progress.busy || generatingCover || !title || !author}
+            >
+              {generatingCover ? "生成中..." : "生成预览"}
+            </button>
+          </div>
+          {#if !title || !author}
+            <p class="hint" style="margin:4px 0 0">请先填写书名与作者，再生成封面</p>
+          {/if}
+          {#if coverDataUrl}
+            <img class="cover-preview" src={coverDataUrl} alt="封面预览" />
+          {/if}
+        </div>
       {/if}
-    </label>
+    </div>
 
     <!-- 字体嵌入 -->
     <div class="section">
@@ -289,6 +364,12 @@
   }
   button.primary:hover:not(:disabled) { background: #1858c4; }
   .hint { font-size: 11px; color: #52606d; }
+  .cover-mode-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
   .cover-preview {
     display: block;
     margin-top: 6px;

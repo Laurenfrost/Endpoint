@@ -23,6 +23,7 @@
 
 pub mod chapter;
 pub mod cleaning;
+pub mod cover_gen;
 pub mod domain;
 pub mod encoding;
 pub mod epub;
@@ -70,6 +71,8 @@ pub enum CoreError {
     Epub(#[from] epub::EpubError),
     #[error(transparent)]
     Kepubify(#[from] kepubify::KepubifyError),
+    #[error(transparent)]
+    CoverGen(#[from] cover_gen::CoverError),
 }
 
 /// 转换选项。所有字段都可选,缺省值取「智能默认」。

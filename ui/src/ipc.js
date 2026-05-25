@@ -75,6 +75,11 @@ export const listThemes = () => invoke("list_themes");
 /// 读取指定主题 CSS 文本内容。name 不含 .css 扩展名。
 export const loadTheme = (name) => invoke("load_theme", { name });
 
+/// 4.3:用字体渲染文字封面。返回 `{ path, dataUrl }`。
+/// style: "default" | "gradient"；fontPath 为 null 时用内置霞鹜文楷。
+export const generateTextCover = (title, author, style, fontPath) =>
+  invoke("generate_text_cover", { title, author, style, fontPath: fontPath ?? null });
+
 /// 监听后台进度事件。payload 形状:
 ///   { task_id, stage, percent, detail }
 ///   stage ∈ "decoding" | "cleaning" | "chapter" | "watermark" | "epub" | "kepubify"

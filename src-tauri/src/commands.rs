@@ -482,6 +482,63 @@ pub async fn load_theme(app: AppHandle, name: String) -> Result<String, String> 
         .map_err(|e| format!("读取主题 {name} 失败: {e}"))
 }
 
+// ============== 阶段四 4.3:文字封面自动生成 ==============
+
+/// 用字体渲染「书名 + 作者」生成 1400×2100 PNG 封面，返回 `{ path, dataUrl }`。
+///
+/// `font_path` 为 `None` 时使用内置霞鹜文楷（需先运行 fetch-fonts.ps1）。
+/// `style` 取 `"default"`（深蓝）或 `"gradient"`（蓝紫）。
+#[tauri::command]
+pub async fn generate_text_cover(
+    app: AppHandle,
+    title: String,
+    author: String,
+    style: String,
+    font_path: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let font_bytes = if let Some(custom) = font_path {
+        std::fs::read(&custom).map_err(|e| format!("读取字体失败: {e}"))?
+    } else {
+        let resource_path = app
+            .path()
+            .resource_dir()
+            .map_err(|e| format!("无法获取资源目录: {e}"))?
+            .join("fonts/LXGWWenKai-Regular.ttf");
+        std::fs::read(&resource_path).map_err(|e| {
+            format!("读取内置字体失败(请先运行 scripts/fetch-fonts.ps1): {e}")
+        })?
+    };
+
+    let cover_style = match style.as_str() {
+        "gradient" => endpoint_core::cover_gen::TextCoverStyle::Gradient,
+        _ => endpoint_core::cover_gen::TextCoverStyle::Default,
+    };
+
+    let png_bytes = async_runtime::spawn_blocking(move || {
+        let opts = endpoint_core::cover_gen::TextCoverOptions {
+            title: &title,
+            author: &author,
+            font_bytes: &font_bytes,
+            style: cover_style,
+        };
+        endpoint_core::cover_gen::generate(&opts).map_err(|e| format!("封面生成失败: {e}"))
+    })
+    .await
+    .map_err(|e| format!("任务调度失败: {e}"))??;
+
+    let temp_path = std::env::temp_dir().join("endpoint_text_cover.png");
+    std::fs::write(&temp_path, &png_bytes)
+        .map_err(|e| format!("写入临时文件失败: {e}"))?;
+
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png_bytes);
+    let data_url = format!("data:image/png;base64,{b64}");
+
+    Ok(serde_json::json!({
+        "path": temp_path.display().to_string(),
+        "dataUrl": data_url,
+    }))
+}
+
 // ============== 阶段零兼容入口(回归保险,前端不再调用) ==============
 
 #[tauri::command]

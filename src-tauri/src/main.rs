@@ -23,6 +23,8 @@ fn main() {
             // 阶段四 4.2:CSS 主题
             commands::list_themes,
             commands::load_theme,
+            // 阶段四 4.3:文字封面
+            commands::generate_text_cover,
             // 阶段零兼容入口(回归保险)
             commands::convert,
         ])

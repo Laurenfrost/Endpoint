@@ -17,6 +17,8 @@ encoding_rs = { workspace = true }
 chardetng = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png"] }
+ab_glyph = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
