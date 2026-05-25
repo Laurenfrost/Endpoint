@@ -44,11 +44,15 @@ pub enum AdjudicationVerdict {
     Uncertain,
 }
 
-/// LLM 对书名/作者的推断结果。
+/// LLM 对书名/作者/简介/封面关键词的推断结果。
 #[derive(Debug, Clone)]
 pub struct MetadataSuggestion {
     pub title: Option<String>,
     pub author: Option<String>,
+    /// 作品简介(可选,给前端"简介"字段填写参考)。
+    pub description: Option<String>,
+    /// 封面关键词建议(可选,供用户手动搜图参考;不自动搜图)。
+    pub cover_keywords: Option<String>,
 }
 
 /// LLM 客户端接口。核心库依赖此 trait 抽象,桥接层提供具体 HTTP 实现。

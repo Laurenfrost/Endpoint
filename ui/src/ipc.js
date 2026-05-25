@@ -87,6 +87,10 @@ export const getLlmConfig = () => invoke("get_llm_config");
 export const setLlmConfig = (baseUrl, model, apiKey) =>
   invoke("set_llm_config", { baseUrl, model, apiKey });
 
+/// 4.6:从缓存 source_text 前约 1 万字推断元数据。
+/// 返回 `{ title?, author?, description?, cover_keywords? }` 或 `null`(未配置 LLM / 无法推断)。
+export const suggestMetadata = () => invoke("suggest_metadata");
+
 /// 监听后台进度事件。payload 形状:
 ///   { task_id, stage, percent, detail }
 ///   stage ∈ "decoding" | "cleaning" | "chapter" | "watermark" | "epub" | "kepubify"

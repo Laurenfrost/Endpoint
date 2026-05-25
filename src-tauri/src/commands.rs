@@ -595,6 +595,57 @@ pub async fn set_llm_config(
     Ok(())
 }
 
+// ============== 阶段四 4.6:LLM 元数据建议 ==============
+
+/// 用 LLM 从缓存 source_text 的前约 1 万字推断书名、作者、简介、封面关键词。
+///
+/// 返回 `{ title?, author?, description?, cover_keywords? }` 或 `null`(无法推断 / 未配置 LLM)。
+/// `LlmError::NotConfigured` 静默转 `Ok(null)`,其余错误返回 `Err`。
+#[tauri::command]
+pub async fn suggest_metadata(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    // 从缓存取 source_text
+    let sample_text = {
+        let guard = state
+            .pipeline
+            .lock()
+            .map_err(|e| format!("pipeline 锁中毒: {e}"))?;
+        let cached = guard
+            .as_ref()
+            .ok_or_else(|| "尚未加载文件,请先调用 load_and_analyze".to_string())?;
+        // 取前约 1 万个 Unicode 字符
+        let chars: String = cached
+            .output
+            .source_text
+            .chars()
+            .take(10_000)
+            .collect();
+        chars
+    };
+
+    // 取当前 LLM 客户端(clone Box 需要引用;在 spawn_blocking 里用)
+    // 用 Arc<Mutex<...>> 持有后传入 blocking 线程
+    let client_guard = state
+        .llm_client
+        .lock()
+        .map_err(|e| format!("llm_client 锁中毒: {e}"))?;
+
+    let suggestion_result = client_guard.suggest_metadata(&sample_text);
+    drop(client_guard);
+
+    use endpoint_core::llm::LlmError;
+    match suggestion_result {
+        Ok(None) => Ok(serde_json::Value::Null),
+        Ok(Some(s)) => Ok(serde_json::json!({
+            "title":          s.title,
+            "author":         s.author,
+            "description":    s.description,
+            "cover_keywords": s.cover_keywords,
+        })),
+        Err(LlmError::NotConfigured) => Ok(serde_json::Value::Null),
+        Err(e) => Err(format!("LLM 调用失败: {e}")),
+    }
+}
+
 // ============== 阶段零兼容入口(回归保险,前端不再调用) ==============
 
 #[tauri::command]

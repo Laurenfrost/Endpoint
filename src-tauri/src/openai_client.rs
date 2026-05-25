@@ -157,39 +157,48 @@ impl LlmClient for OpenAiCompatibleClient {
     }
 
     fn suggest_metadata(&self, sample_text: &str) -> Result<Option<MetadataSuggestion>, LlmError> {
-        let sample = &sample_text[..sample_text.len().min(1200)];
-        let system = "你是中文网络小说电子书制作助手。从给定章节开头文本推断书名和作者。\
-            输出格式(每行一项):\n书名: XXX\n作者: XXX\n如果无法推断请输出「未知」。";
-        let user = format!("章节开头文本:\n{sample}");
+        let char_limit = 10000;
+        let sample: String = sample_text.chars().take(char_limit).collect();
+        let system = "你是中文网络小说电子书制作助手。从给定章节文本推断书名、作者、简介和封面关键词。\
+            输出格式(每行一项,未知的项写「未知」):\n\
+            书名: XXX\n\
+            作者: XXX\n\
+            简介: XXX\n\
+            封面关键词: XXX";
+        let user = format!("章节文本:\n{sample}");
 
         let raw = self.chat(system, &user)?;
         let mut title = None;
         let mut author = None;
+        let mut description = None;
+        let mut cover_keywords = None;
 
         for line in raw.lines() {
-            if let Some(v) = line
-                .strip_prefix("书名:")
-                .or_else(|| line.strip_prefix("书名："))
-            {
-                let v = v.trim();
-                if v != "未知" {
-                    title = Some(v.to_string());
-                }
+            fn extract<'a>(line: &'a str, prefix_cn: &str, prefix_cn2: &str) -> Option<&'a str> {
+                line.strip_prefix(prefix_cn)
+                    .or_else(|| line.strip_prefix(prefix_cn2))
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty() && *v != "未知")
             }
-            if let Some(v) = line
-                .strip_prefix("作者:")
-                .or_else(|| line.strip_prefix("作者："))
-            {
-                let v = v.trim();
-                if v != "未知" {
-                    author = Some(v.to_string());
-                }
+            if let Some(v) = extract(line, "书名:", "书名：") {
+                title = Some(v.to_string());
+            } else if let Some(v) = extract(line, "作者:", "作者：") {
+                author = Some(v.to_string());
+            } else if let Some(v) = extract(line, "简介:", "简介：") {
+                description = Some(v.to_string());
+            } else if let Some(v) = extract(line, "封面关键词:", "封面关键词：") {
+                cover_keywords = Some(v.to_string());
             }
         }
 
-        if title.is_none() && author.is_none() {
+        if title.is_none() && author.is_none() && description.is_none() {
             return Ok(None);
         }
-        Ok(Some(MetadataSuggestion { title, author }))
+        Ok(Some(MetadataSuggestion {
+            title,
+            author,
+            description,
+            cover_keywords,
+        }))
     }
 }

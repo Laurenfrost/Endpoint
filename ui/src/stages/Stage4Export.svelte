@@ -5,7 +5,7 @@
   import {
     pickOutputFile, pickExecutableFile, pickCoverFile, pickFontFile,
     buildEpub, listThemes, loadTheme, generateTextCover,
-    getLlmConfig, setLlmConfig,
+    getLlmConfig, setLlmConfig, suggestMetadata,
   } from "../ipc.js";
   import { llm, applyLlmConfig } from "../stores/llm.svelte.js";
   import { serializeForIpc, decisionCount } from "../stores/decisions.svelte.js";
@@ -39,6 +39,10 @@
   let llmApiKey = $state("");
   let llmSaving = $state(false);
   let llmMsg = $state("");
+  // LLM 元数据建议(4.6)
+  let suggesting = $state(false);
+  let suggestion = $state(null);   // { title?, author?, description?, cover_keywords? } | null
+  let suggestionMsg = $state("");
   // 结果
   let error = $state("");
   let result = $state("");
@@ -160,6 +164,34 @@
     }
   }
 
+  async function onSuggestMetadata() {
+    suggesting = true;
+    suggestion = null;
+    suggestionMsg = "";
+    try {
+      const result = await suggestMetadata();
+      if (!result) {
+        suggestionMsg = llm.configured ? "LLM 无法从正文推断元数据" : "请先在下方配置 LLM";
+      } else {
+        suggestion = result;
+      }
+    } catch (e) {
+      suggestionMsg = String(e);
+    } finally {
+      suggesting = false;
+    }
+  }
+
+  function applySuggestionField(field) {
+    if (field === "title" && suggestion?.title) title = suggestion.title;
+    if (field === "author" && suggestion?.author) author = suggestion.author;
+  }
+
+  function dismissSuggestion() {
+    suggestion = null;
+    suggestionMsg = "";
+  }
+
   async function onBuild() {
     if (!outputPath) return (error = "请先选择输出位置");
     if (!title || !author) return (error = "请填写书名与作者");
@@ -204,15 +236,62 @@
       </div>
     </label>
 
-    <label>
-      <span>书名 *</span>
-      <input type="text" bind:value={title} disabled={progress.busy} />
-    </label>
+    <div class="meta-group">
+      <label>
+        <span>书名 *</span>
+        <input type="text" bind:value={title} disabled={progress.busy} />
+      </label>
+      <label>
+        <span>作者 *</span>
+        <input type="text" bind:value={author} disabled={progress.busy} />
+      </label>
+      <div class="suggest-row">
+        <button
+          class="suggest-btn"
+          onclick={onSuggestMetadata}
+          disabled={progress.busy || suggesting || !pipeline.dto}
+          title={llm.configured ? "从正文前约 1 万字请 LLM 推断书名、作者、简介" : "请先在下方 LLM 设置中配置 API key"}
+        >
+          {suggesting ? "推断中..." : "从正文建议 ▸"}
+        </button>
+        {#if suggestionMsg}<span class="hint suggest-hint">{suggestionMsg}</span>{/if}
+      </div>
 
-    <label>
-      <span>作者 *</span>
-      <input type="text" bind:value={author} disabled={progress.busy} />
-    </label>
+      {#if suggestion}
+        <div class="suggestion-panel">
+          <div class="suggestion-header">
+            <span class="suggestion-title">LLM 建议</span>
+            <button class="link-btn" onclick={dismissSuggestion}>关闭 ✕</button>
+          </div>
+          {#if suggestion.title}
+            <div class="suggestion-row">
+              <span class="sug-label">书名</span>
+              <span class="sug-value">{suggestion.title}</span>
+              <button class="sug-apply" onclick={() => applySuggestionField("title")}>采用</button>
+            </div>
+          {/if}
+          {#if suggestion.author}
+            <div class="suggestion-row">
+              <span class="sug-label">作者</span>
+              <span class="sug-value">{suggestion.author}</span>
+              <button class="sug-apply" onclick={() => applySuggestionField("author")}>采用</button>
+            </div>
+          {/if}
+          {#if suggestion.description}
+            <div class="suggestion-row suggestion-desc">
+              <span class="sug-label">简介</span>
+              <span class="sug-value">{suggestion.description}</span>
+            </div>
+          {/if}
+          {#if suggestion.cover_keywords}
+            <div class="suggestion-row">
+              <span class="sug-label">封面关键词</span>
+              <span class="sug-value sug-hint">{suggestion.cover_keywords}(仅参考)</span>
+            </div>
+          {/if}
+        </div>
+      {/if}
+    </div>
 
     <!-- 封面 -->
     <div class="section">
@@ -539,6 +618,65 @@
     border: 1px dashed #cbd2d9;
     border-radius: 12px;
   }
+  /* 元数据建议 */
+  .meta-group { margin-bottom: 12px; }
+  .meta-group label { margin-bottom: 8px; }
+  .suggest-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .suggest-btn {
+    font-size: 11px;
+    padding: 4px 8px;
+    border: 1px solid #1f6feb;
+    color: #1f6feb;
+    background: #fff;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .suggest-btn:hover:not(:disabled) { background: #e8f0fe; }
+  .suggest-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .suggest-hint { color: #888; }
+  .suggestion-panel {
+    background: #f0f7ff;
+    border: 1px solid #b3d4ff;
+    border-radius: 4px;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    font-size: 12px;
+  }
+  .suggestion-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+  .suggestion-title { font-weight: 600; color: #1f6feb; }
+  .suggestion-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 4px;
+    flex-wrap: wrap;
+  }
+  .suggestion-desc .sug-value { max-width: 100%; white-space: pre-wrap; }
+  .sug-label { color: #52606d; min-width: 70px; flex-shrink: 0; }
+  .sug-value { color: #1f2933; flex: 1; word-break: break-all; }
+  .sug-hint { color: #888; font-style: italic; }
+  .sug-apply {
+    font-size: 11px;
+    padding: 2px 6px;
+    border: 1px solid #1f6feb;
+    color: #1f6feb;
+    background: #fff;
+    border-radius: 3px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .sug-apply:hover { background: #e8f0fe; }
   .llm-dot {
     display: inline-block;
     width: 7px;

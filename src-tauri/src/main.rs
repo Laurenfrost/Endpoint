@@ -30,6 +30,8 @@ fn main() {
             // 阶段四 4.5:LLM 配置
             commands::get_llm_config,
             commands::set_llm_config,
+            // 阶段四 4.6:LLM 元数据建议
+            commands::suggest_metadata,
             // 阶段零兼容入口(回归保险)
             commands::convert,
         ])
