@@ -1,9 +1,8 @@
 <script>
-  // 阶段 4:样式预览与导出。2.3 接入完整功能(沿用 2.2 的临时实现逻辑)。
-  // 2.5 子阶段补:封面预览、前几章前几页预览(若时间允许)。
+  // 阶段 4:样式预览与导出。4.0 封面嵌入 + CSS 覆盖;4.1 字体嵌入 opt-in。
   import { pipeline } from "../stores/pipeline.svelte.js";
   import { progress, setBusy } from "../stores/progress.svelte.js";
-  import { pickOutputFile, pickExecutableFile, pickCoverFile, buildEpub } from "../ipc.js";
+  import { pickOutputFile, pickExecutableFile, pickCoverFile, pickFontFile, buildEpub } from "../ipc.js";
   import { serializeForIpc, decisionCount } from "../stores/decisions.svelte.js";
 
   let outputPath = $state("");
@@ -12,6 +11,10 @@
   let kepubifyPath = $state("");
   let coverPath = $state("");
   let coverDataUrl = $state("");
+  // 字体嵌入(4.1)
+  let embedFonts = $state(false);
+  let fontSource = $state("builtin"); // "builtin" | "custom"
+  let customFontPath = $state("");
   let error = $state("");
   let result = $state("");
 
@@ -57,14 +60,24 @@
     coverDataUrl = "";
   }
 
+  async function onPickCustomFont() {
+    try {
+      const p = await pickFontFile();
+      if (typeof p === "string") customFontPath = p;
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   async function onBuild() {
     if (!outputPath) return (error = "请先选择输出位置");
     if (!title || !author) return (error = "请填写书名与作者");
+    if (embedFonts && fontSource === "custom" && !customFontPath)
+      return (error = "已选自定义字体但未选择字体文件");
     error = "";
     result = "";
     setBusy(true);
     try {
-      // v2.2:把用户决策序列化后随命令带给后端,后端用 apply_user_decisions 重组 cleaning
       const decisions = serializeForIpc();
       const finalPath = await buildEpub({
         outputPath,
@@ -74,6 +87,8 @@
         decisions: decisions.length > 0 ? decisions : null,
         coverPath: coverPath || null,
         cssOverride: null,
+        embedFonts,
+        fontPath: embedFonts && fontSource === "custom" ? customFontPath : null,
       });
       result = finalPath;
     } catch (e) {
@@ -122,7 +137,32 @@
       {/if}
     </label>
 
-    <label>
+    <div class="font-section">
+      <label class="checkbox-label">
+        <input type="checkbox" bind:checked={embedFonts} disabled={progress.busy} />
+        <span>嵌入中文字体(约 +16 MB)</span>
+      </label>
+      {#if embedFonts}
+        <div class="font-options">
+          <label class="radio-label">
+            <input type="radio" bind:group={fontSource} value="builtin" disabled={progress.busy} />
+            霞鹜文楷(内置,需运行 fetch-fonts.ps1)
+          </label>
+          <label class="radio-label">
+            <input type="radio" bind:group={fontSource} value="custom" disabled={progress.busy} />
+            自定义字体文件
+          </label>
+          {#if fontSource === "custom"}
+            <div class="row" style="margin-top:4px;">
+              <input type="text" bind:value={customFontPath} readonly placeholder="选择 .ttf / .otf 文件" />
+              <button onclick={onPickCustomFont} disabled={progress.busy}>选择</button>
+            </div>
+          {/if}
+        </div>
+      {/if}
+    </div>
+
+    <label style="margin-top:12px;">
       <span>kepubify(可选)</span>
       <div class="row">
         <input
@@ -144,10 +184,6 @@
 
     {#if error}<div class="error">{error}</div>{/if}
     {#if result}<div class="ok">✓ {result}</div>{/if}
-
-    <p class="hint" style="margin-top: 16px;">
-      封面 / 字体嵌入 / CSS 编辑器 属于阶段四(详见 CLAUDE.md 路线图)。
-    </p>
   {/if}
 </div>
 
@@ -197,6 +233,42 @@
     border: 1px solid #cbd2d9;
     border-radius: 4px;
   }
+  /* 字体嵌入区域 */
+  .font-section {
+    margin-bottom: 12px;
+    font-size: 12px;
+    color: #52606d;
+  }
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 0;
+    cursor: pointer;
+    user-select: none;
+  }
+  .checkbox-label input[type=checkbox] { margin: 0; width: auto; }
+  .font-options {
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: #f5f7fa;
+    border: 1px solid #e4e7eb;
+    border-radius: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .radio-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 0;
+    cursor: pointer;
+    user-select: none;
+    font-size: 12px;
+    color: #52606d;
+  }
+  .radio-label input[type=radio] { margin: 0; width: auto; }
   .error {
     margin-top: 10px;
     padding: 8px 10px;

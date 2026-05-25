@@ -144,10 +144,21 @@ pub fn build(book: &Book, out_path: &Path, opts: &EpubOptions<'_>) -> Result<(),
     zw.start_file("META-INF/container.xml", deflated)?;
     zw.write_all(CONTAINER_XML.as_bytes())?;
 
-    // CSS(可覆盖)
-    let css = opts.css_override.unwrap_or(DEFAULT_CSS);
+    // CSS(可覆盖);若嵌入字体则追加 @font-face + body 声明
+    let base_css = opts.css_override.unwrap_or(DEFAULT_CSS);
+    let full_css: String;
+    let css_str: &str = if let Some(fb) = opts.font_bytes {
+        full_css = format!(
+            "{base}\n\n@font-face {{\n  font-family: \"EmbedFont\";\n  src: url(\"fonts/{name}.ttf\");\n  font-weight: normal;\n  font-style: normal;\n}}\nbody {{ font-family: \"EmbedFont\", sans-serif; }}\n",
+            base = base_css,
+            name = fb.name,
+        );
+        &full_css
+    } else {
+        base_css
+    };
     zw.start_file("OEBPS/styles.css", deflated)?;
-    zw.write_all(css.as_bytes())?;
+    zw.write_all(css_str.as_bytes())?;
 
     // 封面图片 + 封面 XHTML 页(可选)
     let has_cover = opts.cover.is_some();
@@ -160,7 +171,11 @@ pub fn build(book: &Book, out_path: &Path, opts: &EpubOptions<'_>) -> Result<(),
         zw.write_all(cover_xhtml(opts.cover_mime).as_bytes())?;
     }
 
-    // TODO(4.1):字体嵌入(font_bytes 非空时写入 OEBPS/fonts/ + 追加 @font-face CSS)
+    // 字体嵌入(4.1):font_bytes 非空时写 OEBPS/fonts/<name>.ttf
+    if let Some(fb) = opts.font_bytes {
+        zw.start_file(format!("OEBPS/fonts/{}.ttf", fb.name), deflated)?;
+        zw.write_all(&fb.regular)?;
+    }
 
     let sections = collect_sections(&book.entries);
     let uid = generate_uid(book);
@@ -182,7 +197,8 @@ pub fn build(book: &Book, out_path: &Path, opts: &EpubOptions<'_>) -> Result<(),
     zw.write_all(toc_ncx(book, &book.entries, &sections, &uid).as_bytes())?;
 
     zw.start_file("OEBPS/content.opf", deflated)?;
-    zw.write_all(content_opf(book, &sections, &uid, &modified, opts.cover_mime, has_cover).as_bytes())?;
+    let font_name = opts.font_bytes.as_ref().map(|fb| fb.name.as_str());
+    zw.write_all(content_opf(book, &sections, &uid, &modified, opts.cover_mime, has_cover, font_name).as_bytes())?;
 
     zw.finish()?;
     Ok(())
@@ -564,6 +580,7 @@ fn content_opf(
     modified: &str,
     cover_mime: CoverMime,
     has_cover: bool,
+    font_name: Option<&str>,
 ) -> String {
     let title = xml_escape(&book.metadata.title);
     let author = xml_escape(&book.metadata.author);
@@ -598,6 +615,12 @@ fn content_opf(
         String::new()
     };
 
+    let font_manifest = if let Some(name) = font_name {
+        format!("    <item id=\"font-regular\" href=\"fonts/{name}.ttf\" media-type=\"font/ttf\"/>\n")
+    } else {
+        String::new()
+    };
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" xml:lang="{language}">
@@ -612,7 +635,7 @@ fn content_opf(
     <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
     <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
     <item id="css" href="styles.css" media-type="text/css"/>
-{cover_manifest}{manifest}  </manifest>
+{cover_manifest}{font_manifest}{manifest}  </manifest>
   <spine toc="ncx">
 {cover_spine}{spine}  </spine>
 </package>
@@ -623,6 +646,7 @@ fn content_opf(
         language = language,
         modified = modified,
         cover_manifest = cover_manifest,
+        font_manifest = font_manifest,
         manifest = manifest,
         cover_spine = cover_spine,
         spine = spine,
@@ -891,6 +915,63 @@ mod tests {
         assert!(
             !names.iter().any(|n| n.contains("cover")),
             "无封面时不应有任何 cover 文件,实际: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn font_bytes_are_embedded_in_zip_and_opf_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("with_font.epub");
+        // 伪造的 TTF 字节(不要求合法字体,只验证 epub 结构)
+        let fake_ttf: Vec<u8> = vec![0x00, 0x01, 0x00, 0x00, 0xFF, 0xFF];
+        let fb = FontBytes { name: "TestFont".to_string(), regular: fake_ttf };
+        let opts = EpubOptions { font_bytes: Some(&fb), ..EpubOptions::default() };
+        build(&sample_book(), &out, &opts).unwrap();
+
+        let f = File::open(&out).unwrap();
+        let mut archive = zip::ZipArchive::new(f).unwrap();
+        let names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
+
+        // 字体文件应在 OEBPS/fonts/ 下
+        assert!(
+            names.iter().any(|n| n == "OEBPS/fonts/TestFont.ttf"),
+            "缺少字体文件,实际: {:?}",
+            names
+        );
+
+        // OPF manifest 应含字体 item
+        let mut opf_s = String::new();
+        {
+            let mut opf = archive.by_name("OEBPS/content.opf").unwrap();
+            opf.read_to_string(&mut opf_s).unwrap();
+        }
+        assert!(opf_s.contains("fonts/TestFont.ttf"), "OPF manifest 缺少字体 item");
+        assert!(opf_s.contains("font/ttf"), "OPF manifest 缺少 font/ttf media-type");
+
+        // styles.css 应含 @font-face 声明
+        let mut css_s = String::new();
+        {
+            let mut css = archive.by_name("OEBPS/styles.css").unwrap();
+            css.read_to_string(&mut css_s).unwrap();
+        }
+        assert!(css_s.contains("@font-face"), "styles.css 缺少 @font-face");
+        assert!(css_s.contains("\"EmbedFont\""), "styles.css 缺少 font-family 声明");
+        assert!(css_s.contains("fonts/TestFont.ttf"), "styles.css @font-face src 路径错误");
+    }
+
+    #[test]
+    fn no_font_bytes_epub_has_no_font_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("no_font.epub");
+        build(&sample_book(), &out, &EpubOptions::default()).unwrap();
+
+        let f = File::open(&out).unwrap();
+        let archive = zip::ZipArchive::new(f).unwrap();
+        let names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
+        assert!(
+            !names.iter().any(|n| n.starts_with("OEBPS/fonts/")),
+            "无字体时不应有 fonts/ 目录下文件,实际: {:?}",
             names
         );
     }

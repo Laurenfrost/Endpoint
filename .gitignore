@@ -1,3 +1,5 @@
 /target
 **/target/
 src-tauri/gen/
+src-tauri/resources/fonts/*.ttf
+src-tauri/resources/fonts/*.otf

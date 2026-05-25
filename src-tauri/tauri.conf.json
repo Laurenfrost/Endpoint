@@ -26,6 +26,9 @@
   },
   "bundle": {
     "active": false,
-    "icon": []
+    "icon": [],
+    "resources": {
+      "resources/fonts/*": "fonts/"
+    }
   }
 }

@@ -28,6 +28,7 @@ export const pickOutputFile = (defaultPath) =>
   invoke("pick_output_file", { defaultPath: defaultPath ?? null });
 export const pickExecutableFile = () => invoke("pick_executable_file");
 export const pickCoverFile = () => invoke("pick_cover_file");
+export const pickFontFile = () => invoke("pick_font_file");
 
 /// 加载 txt + 跑完整管线。
 /// `cleaningConfig`:阶段三 v2 新增,前端清洗策略面板的勾选状态(可选,缺省走 default)。
@@ -54,7 +55,7 @@ export const loadAndAnalyze = (
 /// `decisions`(v2.2 新增,可选):用户决策列表,形状 `[{ span:{start,end}, scope, verdict }]`。
 /// `coverPath`(4.0 新增,可选):封面图片绝对路径。
 /// `cssOverride`(4.0 新增,可选):自定义 CSS 字符串,替换内置默认样式。
-export const buildEpub = ({ outputPath, title, author, kepubifyPath, decisions, coverPath, cssOverride }) =>
+export const buildEpub = ({ outputPath, title, author, kepubifyPath, decisions, coverPath, cssOverride, embedFonts, fontPath }) =>
   invoke("build_epub", {
     outputPath,
     title,
@@ -63,6 +64,8 @@ export const buildEpub = ({ outputPath, title, author, kepubifyPath, decisions, 
     decisions: decisions ?? null,
     coverPath: coverPath ?? null,
     cssOverride: cssOverride ?? null,
+    embedFonts: embedFonts ?? false,
+    fontPath: fontPath ?? null,
   });
 
 export const cancelTask = (taskId) => invoke("cancel_task", { taskId });

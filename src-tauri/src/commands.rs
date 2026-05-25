@@ -30,7 +30,7 @@ use endpoint_core::{
     PipelineOutput, ProgressSink,
 };
 use serde::Serialize;
-use tauri::{async_runtime, AppHandle, Emitter, State};
+use tauri::{async_runtime, AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
 use crate::state::{AppState, CachedPipeline};
@@ -111,6 +111,21 @@ pub async fn pick_executable_file(app: AppHandle) -> Option<String> {
         app.dialog()
             .file()
             .add_filter("Executable", &["exe"])
+            .blocking_pick_file()
+            .and_then(file_path_to_string)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// 弹出字体文件选择对话框,返回用户选中的路径(ttf / otf)。用户取消返回 null。
+#[tauri::command]
+pub async fn pick_font_file(app: AppHandle) -> Option<String> {
+    async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .add_filter("Font", &["ttf", "otf"])
             .blocking_pick_file()
             .and_then(file_path_to_string)
     })
@@ -260,6 +275,8 @@ pub async fn build_epub(
     decisions: Option<Vec<serde_json::Value>>,
     cover_path: Option<String>,
     css_override: Option<String>,
+    embed_fonts: Option<bool>,
+    font_path: Option<String>,
 ) -> Result<String, String> {
     // 反序列化决策列表(失败显式报错,不静默)
     let decisions_typed: Vec<endpoint_core::domain::UserDecision> = match decisions {
@@ -301,6 +318,35 @@ pub async fn build_epub(
             .map(|e| e.to_lowercase())
     });
 
+    // 字体字节读取(embed_fonts=true 时)
+    let font_bytes_owned: Option<endpoint_core::epub::FontBytes> = if embed_fonts.unwrap_or(false) {
+        if let Some(custom_path) = &font_path {
+            let bytes = std::fs::read(custom_path)
+                .map_err(|e| format!("读取自定义字体失败: {e}"))?;
+            let name = std::path::Path::new(custom_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("CustomFont")
+                .to_string();
+            Some(endpoint_core::epub::FontBytes { name, regular: bytes })
+        } else {
+            let resource_path = app
+                .path()
+                .resource_dir()
+                .map_err(|e| format!("无法获取资源目录: {e}"))?
+                .join("fonts/LXGWWenKai-Regular.ttf");
+            let bytes = std::fs::read(&resource_path).map_err(|e| {
+                format!("读取内置字体失败(请先运行 scripts/fetch-fonts.ps1): {e}")
+            })?;
+            Some(endpoint_core::epub::FontBytes {
+                name: "LXGWWenKai".to_string(),
+                regular: bytes,
+            })
+        }
+    } else {
+        None
+    };
+
     let task_id = state.next_task_id("build");
     let _cancel_flag = state.register_cancel(&task_id);
 
@@ -332,7 +378,7 @@ pub async fn build_epub(
             );
         }
 
-        // 构造 EpubOptions:封面 + CSS 覆盖(4.0 新增)
+        // 构造 EpubOptions:封面 + CSS 覆盖 + 字体嵌入
         let cover_mime = cover_mime_str
             .as_deref()
             .and_then(endpoint_core::epub::CoverMime::from_path_ext)
@@ -341,7 +387,7 @@ pub async fn build_epub(
             css_override: css_override.as_deref(),
             cover: cover_bytes.as_deref(),
             cover_mime,
-            font_bytes: None, // 4.1 才填
+            font_bytes: font_bytes_owned.as_ref(),
         };
 
         build_epub_from(
