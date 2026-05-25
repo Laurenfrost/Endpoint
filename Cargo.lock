@@ -726,6 +726,7 @@ dependencies = [
 name = "endpoint-app"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "endpoint-core",
  "serde",
  "serde_json",

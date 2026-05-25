@@ -119,6 +119,39 @@ pub async fn pick_executable_file(app: AppHandle) -> Option<String> {
     .flatten()
 }
 
+/// 弹出封面图片选择对话框,读取文件并以 base64 data URL 形式返回预览 + 路径。
+///
+/// 返回 `{ path, data_url }` JSON 对象,供前端 `<img src=data_url>` 预览。
+/// 用户取消时返回 `null`。
+#[tauri::command]
+pub async fn pick_cover_file(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
+    let path_opt = async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .add_filter("Image", &["jpg", "jpeg", "png"])
+            .blocking_pick_file()
+            .and_then(file_path_to_string)
+    })
+    .await
+    .map_err(|e| format!("任务调度失败: {e}"))?;
+
+    let Some(path) = path_opt else {
+        return Ok(None);
+    };
+
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取封面图片失败: {e}"))?;
+    let ext = std::path::Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("jpg")
+        .to_lowercase();
+    let mime = if ext == "png" { "image/png" } else { "image/jpeg" };
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+    let data_url = format!("data:{mime};base64,{b64}");
+
+    Ok(Some(serde_json::json!({ "path": path, "dataUrl": data_url })))
+}
+
 // ============== 阶段二主入口 ==============
 
 /// 加载 txt 并跑完整管线,返回富标注 JSON DTO,并把完整 [`PipelineOutput`] 缓存到
@@ -171,10 +204,11 @@ pub async fn load_and_analyze(
             rules_path: None,
             kepubify_path: None,
             cancel_token: Some(cancel_flag),
-            // 阶段三 v2.1 新增:前端水印阈值面板的设置
             watermark: watermark_cfg,
-            // 阶段三 v2 新增:前端清洗策略面板的勾选状态
             cleaning: cleaning_cfg,
+            css_override: None,
+            embed_fonts: false,
+            font_bytes: None,
         };
         // 阶段 1 不强制元数据,先用占位;阶段 4 通过 build_epub 的 title/author 参数覆盖。
         let metadata = Metadata::new("", "");
@@ -224,6 +258,8 @@ pub async fn build_epub(
     author: String,
     kepubify_path: Option<String>,
     decisions: Option<Vec<serde_json::Value>>,
+    cover_path: Option<String>,
+    css_override: Option<String>,
 ) -> Result<String, String> {
     // 反序列化决策列表(失败显式报错,不静默)
     let decisions_typed: Vec<endpoint_core::domain::UserDecision> = match decisions {
@@ -252,6 +288,18 @@ pub async fn build_epub(
         out.book.metadata.author = author;
         out
     };
+
+    // 在主线程读封面字节(IO 在 blocking 里也行,但封面文件通常很小)
+    let cover_bytes: Option<Vec<u8>> = match &cover_path {
+        Some(p) => Some(std::fs::read(p).map_err(|e| format!("读取封面图片失败: {e}"))?),
+        None => None,
+    };
+    let cover_mime_str = cover_path.as_deref().and_then(|p| {
+        std::path::Path::new(p)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+    });
 
     let task_id = state.next_task_id("build");
     let _cancel_flag = state.register_cancel(&task_id);
@@ -284,10 +332,23 @@ pub async fn build_epub(
             );
         }
 
+        // 构造 EpubOptions:封面 + CSS 覆盖(4.0 新增)
+        let cover_mime = cover_mime_str
+            .as_deref()
+            .and_then(endpoint_core::epub::CoverMime::from_path_ext)
+            .unwrap_or(endpoint_core::epub::CoverMime::Jpeg);
+        let epub_opts = endpoint_core::epub::EpubOptions {
+            css_override: css_override.as_deref(),
+            cover: cover_bytes.as_deref(),
+            cover_mime,
+            font_bytes: None, // 4.1 才填
+        };
+
         build_epub_from(
             &pipeline,
             &output_owned,
             kepubify_owned.as_deref(),
+            &epub_opts,
             &sink,
         )
         .map_err(|e| format!("{e}"))
@@ -343,6 +404,9 @@ pub async fn convert(
             cancel_token: None,
             watermark: None,
             cleaning: None,
+            css_override: None,
+            embed_fonts: false,
+            font_bytes: None,
         };
         core_convert(&input_p, &output_p, metadata, &options)
     })

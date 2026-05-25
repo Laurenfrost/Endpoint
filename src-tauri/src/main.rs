@@ -18,6 +18,7 @@ fn main() {
             commands::pick_input_file,
             commands::pick_output_file,
             commands::pick_executable_file,
+            commands::pick_cover_file,
             // 阶段零兼容入口(回归保险)
             commands::convert,
         ])

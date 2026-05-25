@@ -1,10 +1,10 @@
 //! EPUB 3 构建。
 //!
-//! 阶段零最小可用版本:输入 `Book`,输出符合规范的 .epub 文件。包含 OPF、NCX、EPUB 3 nav、
-//! 章节 XHTML、写死的默认 CSS。**不嵌入字体**——字体嵌入归到后续阶段。
-//!
-//! 卷的支持是占位的:阶段零的章节切分不会产出卷,但本模块对 `BookEntry::Volume` 做了展平,
-//! 后续阶段无需重写此处即可让 spine 工作(目录展示卷层级则留待后续)。
+//! 阶段零最小可用版本基础上,阶段四 4.0 扩展:
+//! - **CSS 覆盖**:通过 [`EpubOptions::css_override`] 替换内嵌的 `DEFAULT_CSS`。
+//! - **封面嵌入**:通过 [`EpubOptions::cover`] 写入封面图片 + 封面 XHTML 页 +
+//!   OPF manifest `properties="cover-image"` + spine 首位。
+//! - **字体嵌入**([`EpubOptions::font_bytes`]):接口已定义,4.1 子阶段填实逻辑。
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -16,6 +16,98 @@ use zip::write::{FileOptions, ZipWriter};
 use zip::CompressionMethod;
 
 use crate::domain::{Book, BookEntry, Chapter, Volume};
+
+// ==================== 公开类型 ====================
+
+/// 封面图片的 MIME 类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverMime {
+    Jpeg,
+    Png,
+    Svg,
+}
+
+impl CoverMime {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CoverMime::Jpeg => "image/jpeg",
+            CoverMime::Png => "image/png",
+            CoverMime::Svg => "image/svg+xml",
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            CoverMime::Jpeg => "jpg",
+            CoverMime::Png => "png",
+            CoverMime::Svg => "svg",
+        }
+    }
+
+    /// 从文件路径扩展名推断 MIME 类型。不认识的扩展名返回 `None`。
+    pub fn from_path(path: &str) -> Option<Self> {
+        let lower = path.to_lowercase();
+        if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+            Some(CoverMime::Jpeg)
+        } else if lower.ends_with(".png") {
+            Some(CoverMime::Png)
+        } else if lower.ends_with(".svg") {
+            Some(CoverMime::Svg)
+        } else {
+            None
+        }
+    }
+
+    /// 从已分离的小写扩展名字符串推断 MIME 类型(`"jpg"`/`"jpeg"`/`"png"`/`"svg"`)。
+    pub fn from_path_ext(ext: &str) -> Option<Self> {
+        match ext {
+            "jpg" | "jpeg" => Some(CoverMime::Jpeg),
+            "png" => Some(CoverMime::Png),
+            "svg" => Some(CoverMime::Svg),
+            _ => None,
+        }
+    }
+}
+
+/// 嵌入字体的二进制资产。阶段四 4.1 起在 `build()` 中实际写入 zip。
+///
+/// 字节由桥接层从 Tauri resource 目录读取后传入——核心库不做文件 I/O。
+#[derive(Debug, Clone)]
+pub struct FontBytes {
+    /// 字体展示名称,用于 CSS `font-family` 声明(如 `"LXGWWenKai"`)。
+    pub name: String,
+    /// Regular 字重字体字节(TTF 或 OTF)。
+    pub regular: Vec<u8>,
+}
+
+/// EPUB 构建选项。所有字段均可选,缺省值取保守默认。
+///
+/// ## 子阶段实现状态
+/// - **4.0**:`css_override` + `cover` + `cover_mime`。
+/// - **4.1**:`font_bytes`(接口已在此定义,build 逻辑待实现)。
+pub struct EpubOptions<'a> {
+    /// 覆盖内嵌的 `DEFAULT_CSS`。`None` 使用默认样式。
+    pub css_override: Option<&'a str>,
+    /// 封面图片字节。`None` 表示无封面,epub 不生成封面页。
+    pub cover: Option<&'a [u8]>,
+    /// 封面 MIME 类型。`cover` 非 `None` 时有效;默认 `CoverMime::Jpeg`。
+    pub cover_mime: CoverMime,
+    /// 嵌入字体(阶段四 4.1 正式实现)。`None` 不嵌入字体。
+    pub font_bytes: Option<&'a FontBytes>,
+}
+
+impl Default for EpubOptions<'_> {
+    fn default() -> Self {
+        EpubOptions {
+            css_override: None,
+            cover: None,
+            cover_mime: CoverMime::Jpeg,
+            font_bytes: None,
+        }
+    }
+}
+
+// ==================== 错误类型 ====================
 
 #[derive(Debug, Error)]
 pub enum EpubError {
@@ -33,7 +125,9 @@ pub enum EpubError {
 
 const DEFAULT_CSS: &str = include_str!("default.css");
 
-pub fn build(book: &Book, out_path: &Path) -> Result<(), EpubError> {
+// ==================== 主构建入口 ====================
+
+pub fn build(book: &Book, out_path: &Path, opts: &EpubOptions<'_>) -> Result<(), EpubError> {
     let file = File::create(out_path).map_err(|e| EpubError::CreateOutput {
         path: out_path.display().to_string(),
         source: e,
@@ -50,8 +144,23 @@ pub fn build(book: &Book, out_path: &Path) -> Result<(), EpubError> {
     zw.start_file("META-INF/container.xml", deflated)?;
     zw.write_all(CONTAINER_XML.as_bytes())?;
 
+    // CSS(可覆盖)
+    let css = opts.css_override.unwrap_or(DEFAULT_CSS);
     zw.start_file("OEBPS/styles.css", deflated)?;
-    zw.write_all(DEFAULT_CSS.as_bytes())?;
+    zw.write_all(css.as_bytes())?;
+
+    // 封面图片 + 封面 XHTML 页(可选)
+    let has_cover = opts.cover.is_some();
+    if let Some(cover_bytes) = opts.cover {
+        let ext = opts.cover_mime.extension();
+        zw.start_file(format!("OEBPS/cover.{ext}"), deflated)?;
+        zw.write_all(cover_bytes)?;
+
+        zw.start_file("OEBPS/cover.xhtml", deflated)?;
+        zw.write_all(cover_xhtml(opts.cover_mime).as_bytes())?;
+    }
+
+    // TODO(4.1):字体嵌入(font_bytes 非空时写入 OEBPS/fonts/ + 追加 @font-face CSS)
 
     let sections = collect_sections(&book.entries);
     let uid = generate_uid(book);
@@ -73,11 +182,13 @@ pub fn build(book: &Book, out_path: &Path) -> Result<(), EpubError> {
     zw.write_all(toc_ncx(book, &book.entries, &sections, &uid).as_bytes())?;
 
     zw.start_file("OEBPS/content.opf", deflated)?;
-    zw.write_all(content_opf(book, &sections, &uid, &modified).as_bytes())?;
+    zw.write_all(content_opf(book, &sections, &uid, &modified, opts.cover_mime, has_cover).as_bytes())?;
 
     zw.finish()?;
     Ok(())
 }
+
+// ==================== 内部类型 ====================
 
 /// 写入 EPUB 的一份"小节":要么是卷分隔页,要么是章节正文页。每份小节对应
 /// 一个 manifest item + spine itemref + 独立 xhtml 文件。
@@ -236,6 +347,33 @@ fn epoch_to_ymdhms(mut secs: u64) -> (u32, u32, u32, u32, u32, u32) {
 
 fn is_leap(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+// ==================== XHTML 生成 ====================
+
+fn cover_xhtml(mime: CoverMime) -> String {
+    let src = format!("cover.{}", mime.extension());
+    // CSS 大括号在 format! 里必须用 {{ / }} 转义。
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="zh-CN" lang="zh-CN">
+<head>
+  <title>封面</title>
+  <meta charset="utf-8"/>
+  <style type="text/css">
+    @page {{ padding: 0; margin: 0; }}
+    body {{ margin: 0; padding: 0; text-align: center; }}
+    img {{ height: 100%; max-width: 100%; }}
+  </style>
+</head>
+<body>
+  <div><img src="{src}" alt="封面"/></div>
+</body>
+</html>
+"#,
+        src = src,
+    )
 }
 
 fn chapter_xhtml(ch: &Chapter) -> String {
@@ -419,7 +557,14 @@ fn toc_ncx(book: &Book, entries: &[BookEntry], sections: &[Section<'_>], uid: &s
     )
 }
 
-fn content_opf(book: &Book, sections: &[Section<'_>], uid: &str, modified: &str) -> String {
+fn content_opf(
+    book: &Book,
+    sections: &[Section<'_>],
+    uid: &str,
+    modified: &str,
+    cover_mime: CoverMime,
+    has_cover: bool,
+) -> String {
     let title = xml_escape(&book.metadata.title);
     let author = xml_escape(&book.metadata.author);
     let language = xml_escape(&book.metadata.language);
@@ -435,6 +580,24 @@ fn content_opf(book: &Book, sections: &[Section<'_>], uid: &str, modified: &str)
         spine.push_str(&format!("    <itemref idref=\"{}\"/>\n", s.id));
     }
 
+    // 封面:manifest 加 cover-image item + cover XHTML item;spine 首位加封面页
+    let cover_manifest = if has_cover {
+        format!(
+            "    <item id=\"cover-image\" href=\"cover.{ext}\" media-type=\"{mime}\" properties=\"cover-image\"/>\n\
+                 <item id=\"cover\" href=\"cover.xhtml\" media-type=\"application/xhtml+xml\"/>\n",
+            ext = cover_mime.extension(),
+            mime = cover_mime.as_str(),
+        )
+    } else {
+        String::new()
+    };
+
+    let cover_spine = if has_cover {
+        "    <itemref idref=\"cover\" linear=\"yes\"/>\n".to_string()
+    } else {
+        String::new()
+    };
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" xml:lang="{language}">
@@ -449,9 +612,9 @@ fn content_opf(book: &Book, sections: &[Section<'_>], uid: &str, modified: &str)
     <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
     <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
     <item id="css" href="styles.css" media-type="text/css"/>
-{manifest}  </manifest>
+{cover_manifest}{manifest}  </manifest>
   <spine toc="ncx">
-{spine}  </spine>
+{cover_spine}{spine}  </spine>
 </package>
 "#,
         uid = xml_escape(uid),
@@ -459,7 +622,9 @@ fn content_opf(book: &Book, sections: &[Section<'_>], uid: &str, modified: &str)
         author = author,
         language = language,
         modified = modified,
+        cover_manifest = cover_manifest,
         manifest = manifest,
+        cover_spine = cover_spine,
         spine = spine,
     )
 }
@@ -471,6 +636,8 @@ const CONTAINER_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </rootfiles>
 </container>
 "#;
+
+// ==================== 测试 ====================
 
 #[cfg(test)]
 mod tests {
@@ -506,7 +673,7 @@ mod tests {
     fn writes_a_valid_zip_with_mimetype_first_and_stored() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out.epub");
-        build(&sample_book(), &out).unwrap();
+        build(&sample_book(), &out, &EpubOptions::default()).unwrap();
 
         let f = File::open(&out).unwrap();
         let mut archive = zip::ZipArchive::new(f).unwrap();
@@ -537,7 +704,7 @@ mod tests {
     fn mimetype_content_is_exact() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out.epub");
-        build(&sample_book(), &out).unwrap();
+        build(&sample_book(), &out, &EpubOptions::default()).unwrap();
 
         let f = File::open(&out).unwrap();
         let mut archive = zip::ZipArchive::new(f).unwrap();
@@ -592,7 +759,7 @@ mod tests {
     fn volumes_get_their_own_xhtml_and_appear_in_toc() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("with_volumes.epub");
-        build(&book_with_volumes(), &out).unwrap();
+        build(&book_with_volumes(), &out, &EpubOptions::default()).unwrap();
 
         let f = File::open(&out).unwrap();
         let mut archive = zip::ZipArchive::new(f).unwrap();
@@ -646,7 +813,7 @@ mod tests {
     fn opf_contains_escaped_title_and_all_chapters() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out.epub");
-        build(&sample_book(), &out).unwrap();
+        build(&sample_book(), &out, &EpubOptions::default()).unwrap();
 
         let f = File::open(&out).unwrap();
         let mut archive = zip::ZipArchive::new(f).unwrap();
@@ -656,5 +823,75 @@ mod tests {
         assert!(s.contains("测试书 &amp; 标点"), "title 未转义");
         assert!(s.contains("chapter_0001.xhtml"));
         assert!(s.contains("chapter_0002.xhtml"));
+    }
+
+    #[test]
+    fn cover_image_appears_in_manifest_and_spine_when_provided() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("with_cover.epub");
+        // 最小 JPEG 占位字节(不要求图片有效,只验证 epub 结构)
+        let fake_jpeg: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        let opts = EpubOptions {
+            cover: Some(&fake_jpeg),
+            cover_mime: CoverMime::Jpeg,
+            ..EpubOptions::default()
+        };
+        build(&sample_book(), &out, &opts).unwrap();
+
+        let f = File::open(&out).unwrap();
+        let mut archive = zip::ZipArchive::new(f).unwrap();
+        let names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
+
+        // 封面图片 + 封面 XHTML 都应存在
+        assert!(names.iter().any(|n| n == "OEBPS/cover.jpg"), "缺少 cover.jpg");
+        assert!(names.iter().any(|n| n == "OEBPS/cover.xhtml"), "缺少 cover.xhtml");
+
+        // OPF 应含 cover-image property + cover xhtml item
+        let mut opf_s = String::new();
+        {
+            let mut opf = archive.by_name("OEBPS/content.opf").unwrap();
+            opf.read_to_string(&mut opf_s).unwrap();
+        }
+        assert!(opf_s.contains("properties=\"cover-image\""), "OPF 缺少 cover-image property");
+        assert!(opf_s.contains("cover.jpg"), "OPF manifest 缺少 cover.jpg");
+        assert!(opf_s.contains("cover.xhtml"), "OPF manifest 缺少 cover.xhtml");
+
+        // spine 首位应是封面页
+        assert!(opf_s.contains(r#"idref="cover""#), "spine 缺少封面 itemref");
+    }
+
+    #[test]
+    fn css_override_replaces_default_stylesheet() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("custom_css.epub");
+        let my_css = "body { font-size: 20px; color: #111; }";
+        let opts = EpubOptions {
+            css_override: Some(my_css),
+            ..EpubOptions::default()
+        };
+        build(&sample_book(), &out, &opts).unwrap();
+
+        let f = File::open(&out).unwrap();
+        let mut archive = zip::ZipArchive::new(f).unwrap();
+        let mut css_entry = archive.by_name("OEBPS/styles.css").unwrap();
+        let mut css_content = String::new();
+        css_entry.read_to_string(&mut css_content).unwrap();
+        assert_eq!(css_content, my_css, "styles.css 内容应等于传入的 css_override");
+    }
+
+    #[test]
+    fn no_cover_epub_has_no_cover_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("no_cover.epub");
+        build(&sample_book(), &out, &EpubOptions::default()).unwrap();
+
+        let f = File::open(&out).unwrap();
+        let archive = zip::ZipArchive::new(f).unwrap();
+        let names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
+        assert!(
+            !names.iter().any(|n| n.contains("cover")),
+            "无封面时不应有任何 cover 文件,实际: {:?}",
+            names
+        );
     }
 }

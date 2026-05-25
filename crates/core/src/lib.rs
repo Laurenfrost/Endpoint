@@ -94,6 +94,12 @@ pub struct ConvertOptions {
     /// 其余 4 个开)。前端 Stage2 顶部"清洗策略"折叠面板可改;改后调
     /// `load_and_analyze` 重新分析。详见 `docs/stage3-v2-design.md` 第三节。
     pub cleaning: Option<cleaning::CleaningConfig>,
+    /// **阶段四 4.0 新增**:自定义 CSS 字符串。`None` = 使用内置默认 CSS。
+    pub css_override: Option<String>,
+    /// **阶段四 4.1 新增**:是否嵌入字体(默认 `false`,用户主动开启)。
+    pub embed_fonts: bool,
+    /// **阶段四 4.1 新增**:字体字节。`None` = 不嵌入;`embed_fonts = false` 时此字段无效。
+    pub font_bytes: Option<epub::FontBytes>,
 }
 
 /// 阶段二界面会消费的入口:从字节运行完整文本管线,产出富标注。
@@ -175,10 +181,11 @@ pub fn build_epub_from(
     pipeline: &PipelineOutput,
     output_epub: &Path,
     kepubify_path: Option<&Path>,
+    epub_opts: &epub::EpubOptions<'_>,
     progress: &dyn ProgressSink,
 ) -> Result<PathBuf, CoreError> {
     progress.report("epub", 0, None);
-    epub::build(&pipeline.book, output_epub)?;
+    epub::build(&pipeline.book, output_epub, epub_opts)?;
     progress.report("epub", 100, None);
 
     if let Some(kepubify) = kepubify_path {
@@ -211,10 +218,16 @@ pub fn convert(
         })
     })?;
     let pipeline = run_pipeline(&bytes, metadata, options, &NoopSink)?;
+    let css_ref = options.css_override.as_deref();
+    let epub_opts = epub::EpubOptions {
+        css_override: css_ref,
+        ..epub::EpubOptions::default()
+    };
     build_epub_from(
         &pipeline,
         output_epub,
         options.kepubify_path.as_deref(),
+        &epub_opts,
         &NoopSink,
     )
 }

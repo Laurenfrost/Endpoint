@@ -3,13 +3,15 @@
   // 2.5 子阶段补:封面预览、前几章前几页预览(若时间允许)。
   import { pipeline } from "../stores/pipeline.svelte.js";
   import { progress, setBusy } from "../stores/progress.svelte.js";
-  import { pickOutputFile, pickExecutableFile, buildEpub } from "../ipc.js";
+  import { pickOutputFile, pickExecutableFile, pickCoverFile, buildEpub } from "../ipc.js";
   import { serializeForIpc, decisionCount } from "../stores/decisions.svelte.js";
 
   let outputPath = $state("");
   let title = $state("");
   let author = $state("");
   let kepubifyPath = $state("");
+  let coverPath = $state("");
+  let coverDataUrl = $state("");
   let error = $state("");
   let result = $state("");
 
@@ -38,6 +40,23 @@
     }
   }
 
+  async function onPickCover() {
+    try {
+      const res = await pickCoverFile();
+      if (res && res.path) {
+        coverPath = res.path;
+        coverDataUrl = res.dataUrl;
+      }
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  function onClearCover() {
+    coverPath = "";
+    coverDataUrl = "";
+  }
+
   async function onBuild() {
     if (!outputPath) return (error = "请先选择输出位置");
     if (!title || !author) return (error = "请填写书名与作者");
@@ -53,6 +72,8 @@
         author,
         kepubifyPath: kepubifyPath || null,
         decisions: decisions.length > 0 ? decisions : null,
+        coverPath: coverPath || null,
+        cssOverride: null,
       });
       result = finalPath;
     } catch (e) {
@@ -85,6 +106,20 @@
     <label>
       <span>作者 *</span>
       <input type="text" bind:value={author} disabled={progress.busy} />
+    </label>
+
+    <label>
+      <span>封面图片(可选)</span>
+      <div class="row">
+        <input type="text" bind:value={coverPath} readonly placeholder="留空则无封面" />
+        <button onclick={onPickCover} disabled={progress.busy}>选择</button>
+        {#if coverPath}
+          <button onclick={onClearCover} disabled={progress.busy} title="清除封面">✕</button>
+        {/if}
+      </div>
+      {#if coverDataUrl}
+        <img class="cover-preview" src={coverDataUrl} alt="封面预览" />
+      {/if}
     </label>
 
     <label>
@@ -153,6 +188,15 @@
   }
   button.primary:hover:not(:disabled) { background: #1858c4; }
   .hint { font-size: 11px; color: #52606d; }
+  .cover-preview {
+    display: block;
+    margin-top: 6px;
+    max-width: 100%;
+    max-height: 180px;
+    object-fit: contain;
+    border: 1px solid #cbd2d9;
+    border-radius: 4px;
+  }
   .error {
     margin-top: 10px;
     padding: 8px 10px;
