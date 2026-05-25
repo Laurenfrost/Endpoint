@@ -1,20 +1,33 @@
 <script>
-  // 阶段 4:样式预览与导出。4.0 封面嵌入 + CSS 覆盖;4.1 字体嵌入 opt-in。
+  // 阶段 4:样式预览与导出。4.0 封面+CSS 覆盖;4.1 字体嵌入;4.2 CSS 主题预设+编辑器。
   import { pipeline } from "../stores/pipeline.svelte.js";
   import { progress, setBusy } from "../stores/progress.svelte.js";
-  import { pickOutputFile, pickExecutableFile, pickCoverFile, pickFontFile, buildEpub } from "../ipc.js";
+  import {
+    pickOutputFile, pickExecutableFile, pickCoverFile, pickFontFile,
+    buildEpub, listThemes, loadTheme,
+  } from "../ipc.js";
   import { serializeForIpc, decisionCount } from "../stores/decisions.svelte.js";
+
+  const THEME_LABELS = { standard: "标准", classic: "古风", highcontrast: "高对比度" };
 
   let outputPath = $state("");
   let title = $state("");
   let author = $state("");
   let kepubifyPath = $state("");
+  // 封面
   let coverPath = $state("");
   let coverDataUrl = $state("");
-  // 字体嵌入(4.1)
+  // 字体
   let embedFonts = $state(false);
-  let fontSource = $state("builtin"); // "builtin" | "custom"
+  let fontSource = $state("builtin");
   let customFontPath = $state("");
+  // CSS 主题
+  let themes = $state([]);          // 主题名称列表
+  let selectedTheme = $state("");   // 当前选中主题名;"" = 自定义
+  let cssText = $state("");         // textarea 内容
+  let cssExpanded = $state(false);  // 高级 CSS 展开状态
+  let loadingTheme = $state(false);
+  // 结果
   let error = $state("");
   let result = $state("");
 
@@ -25,48 +38,65 @@
     }
   });
 
+  // 加载主题列表(仅一次)
+  $effect(() => {
+    if (pipeline.dto && themes.length === 0) {
+      listThemes().then(list => {
+        themes = list;
+        if (list.includes("standard")) {
+          onSelectTheme("standard");
+        }
+      }).catch(() => {});
+    }
+  });
+
+  async function onSelectTheme(name) {
+    if (name === selectedTheme) return;
+    loadingTheme = true;
+    try {
+      const css = await loadTheme(name);
+      cssText = css;
+      selectedTheme = name;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      loadingTheme = false;
+    }
+  }
+
+  function onCssInput() {
+    // 用户直接编辑了 textarea → 切换为自定义
+    selectedTheme = "";
+  }
+
   async function onPickOutput() {
     try {
       const p = await pickOutputFile(outputPath || null);
       if (typeof p === "string") outputPath = p;
-    } catch (e) {
-      error = String(e);
-    }
+    } catch (e) { error = String(e); }
   }
 
   async function onPickKepubify() {
     try {
       const p = await pickExecutableFile();
       if (typeof p === "string") kepubifyPath = p;
-    } catch (e) {
-      error = String(e);
-    }
+    } catch (e) { error = String(e); }
   }
 
   async function onPickCover() {
     try {
       const res = await pickCoverFile();
-      if (res && res.path) {
-        coverPath = res.path;
-        coverDataUrl = res.dataUrl;
-      }
-    } catch (e) {
-      error = String(e);
-    }
+      if (res && res.path) { coverPath = res.path; coverDataUrl = res.dataUrl; }
+    } catch (e) { error = String(e); }
   }
 
-  function onClearCover() {
-    coverPath = "";
-    coverDataUrl = "";
-  }
+  function onClearCover() { coverPath = ""; coverDataUrl = ""; }
 
   async function onPickCustomFont() {
     try {
       const p = await pickFontFile();
       if (typeof p === "string") customFontPath = p;
-    } catch (e) {
-      error = String(e);
-    }
+    } catch (e) { error = String(e); }
   }
 
   async function onBuild() {
@@ -86,7 +116,7 @@
         kepubifyPath: kepubifyPath || null,
         decisions: decisions.length > 0 ? decisions : null,
         coverPath: coverPath || null,
-        cssOverride: null,
+        cssOverride: cssText || null,
         embedFonts,
         fontPath: embedFonts && fontSource === "custom" ? customFontPath : null,
       });
@@ -123,6 +153,7 @@
       <input type="text" bind:value={author} disabled={progress.busy} />
     </label>
 
+    <!-- 封面图片 -->
     <label>
       <span>封面图片(可选)</span>
       <div class="row">
@@ -137,16 +168,17 @@
       {/if}
     </label>
 
-    <div class="font-section">
+    <!-- 字体嵌入 -->
+    <div class="section">
       <label class="checkbox-label">
         <input type="checkbox" bind:checked={embedFonts} disabled={progress.busy} />
         <span>嵌入中文字体(约 +16 MB)</span>
       </label>
       {#if embedFonts}
-        <div class="font-options">
+        <div class="inset">
           <label class="radio-label">
             <input type="radio" bind:group={fontSource} value="builtin" disabled={progress.busy} />
-            霞鹜文楷(内置,需运行 fetch-fonts.ps1)
+            霞鹜文楷(内置)
           </label>
           <label class="radio-label">
             <input type="radio" bind:group={fontSource} value="custom" disabled={progress.busy} />
@@ -154,7 +186,7 @@
           </label>
           {#if fontSource === "custom"}
             <div class="row" style="margin-top:4px;">
-              <input type="text" bind:value={customFontPath} readonly placeholder="选择 .ttf / .otf 文件" />
+              <input type="text" bind:value={customFontPath} readonly placeholder="选择 .ttf / .otf" />
               <button onclick={onPickCustomFont} disabled={progress.busy}>选择</button>
             </div>
           {/if}
@@ -162,15 +194,46 @@
       {/if}
     </div>
 
-    <label style="margin-top:12px;">
+    <!-- CSS 主题 -->
+    <div class="section">
+      <div class="section-header">
+        <span class="section-title">样式主题</span>
+        <button class="link-btn" onclick={() => cssExpanded = !cssExpanded}>
+          {cssExpanded ? "收起 CSS ▲" : "编辑 CSS ▼"}
+        </button>
+      </div>
+      <div class="theme-row">
+        {#each themes as t}
+          <button
+            class="theme-btn"
+            class:active={selectedTheme === t}
+            disabled={progress.busy || loadingTheme}
+            onclick={() => onSelectTheme(t)}
+          >
+            {THEME_LABELS[t] ?? t}
+          </button>
+        {/each}
+        {#if selectedTheme === ""}
+          <span class="custom-tag">自定义</span>
+        {/if}
+      </div>
+      {#if cssExpanded}
+        <textarea
+          class="css-editor"
+          bind:value={cssText}
+          oninput={onCssInput}
+          disabled={progress.busy}
+          spellcheck={false}
+          rows={14}
+        ></textarea>
+      {/if}
+    </div>
+
+    <!-- kepubify -->
+    <label style="margin-top:4px;">
       <span>kepubify(可选)</span>
       <div class="row">
-        <input
-          type="text"
-          bind:value={kepubifyPath}
-          placeholder="留空只出 .epub"
-          disabled={progress.busy}
-        />
+        <input type="text" bind:value={kepubifyPath} placeholder="留空只出 .epub" disabled={progress.busy} />
         <button onclick={onPickKepubify} disabled={progress.busy}>选择</button>
       </div>
     </label>
@@ -179,7 +242,7 @@
       {progress.busy ? "生成中..." : "生成 EPUB"}
     </button>
     {#if decisionCount() > 0}
-      <p class="hint" style="margin-top: 6px;">将随生成应用 <strong>{decisionCount()}</strong> 条用户决策(阶段 2 中的接受 / 拒绝)。</p>
+      <p class="hint" style="margin-top:6px;">将随生成应用 <strong>{decisionCount()}</strong> 条用户决策。</p>
     {/if}
 
     {#if error}<div class="error">{error}</div>{/if}
@@ -202,6 +265,7 @@
     font-size: 12px;
     background: #fff;
     color: #1f2933;
+    box-sizing: border-box;
   }
   button {
     padding: 5px 10px;
@@ -211,6 +275,7 @@
     border-radius: 4px;
     cursor: pointer;
     color: #1f2933;
+    white-space: nowrap;
   }
   button:hover:not(:disabled) { background: #eef1f5; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -233,22 +298,13 @@
     border: 1px solid #cbd2d9;
     border-radius: 4px;
   }
-  /* 字体嵌入区域 */
-  .font-section {
+  /* 通用 section 容器 */
+  .section {
     margin-bottom: 12px;
     font-size: 12px;
     color: #52606d;
   }
-  .checkbox-label {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-bottom: 0;
-    cursor: pointer;
-    user-select: none;
-  }
-  .checkbox-label input[type=checkbox] { margin: 0; width: auto; }
-  .font-options {
+  .inset {
     margin-top: 8px;
     padding: 8px 10px;
     background: #f5f7fa;
@@ -258,7 +314,7 @@
     flex-direction: column;
     gap: 6px;
   }
-  .radio-label {
+  .checkbox-label, .radio-label {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -268,7 +324,62 @@
     font-size: 12px;
     color: #52606d;
   }
+  .checkbox-label input[type=checkbox],
   .radio-label input[type=radio] { margin: 0; width: auto; }
+  /* CSS 主题区域 */
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .section-title { font-weight: 600; color: #52606d; }
+  .link-btn {
+    border: none;
+    background: none;
+    color: #1f6feb;
+    font-size: 11px;
+    padding: 0;
+    cursor: pointer;
+  }
+  .link-btn:hover { text-decoration: underline; }
+  .theme-row { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+  .theme-btn {
+    padding: 4px 10px;
+    font-size: 11px;
+    border: 1px solid #cbd2d9;
+    border-radius: 12px;
+    background: #fff;
+    color: #52606d;
+    cursor: pointer;
+  }
+  .theme-btn.active {
+    background: #1f6feb;
+    color: #fff;
+    border-color: #1f6feb;
+  }
+  .custom-tag {
+    font-size: 11px;
+    color: #888;
+    padding: 4px 8px;
+    border: 1px dashed #cbd2d9;
+    border-radius: 12px;
+  }
+  .css-editor {
+    display: block;
+    width: 100%;
+    margin-top: 8px;
+    padding: 8px;
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    border: 1px solid #cbd2d9;
+    border-radius: 4px;
+    background: #f8fafc;
+    color: #1f2933;
+    resize: vertical;
+    box-sizing: border-box;
+  }
   .error {
     margin-top: 10px;
     padding: 8px 10px;

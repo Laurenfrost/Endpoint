@@ -28,7 +28,8 @@
     "active": false,
     "icon": [],
     "resources": {
-      "resources/fonts/*": "fonts/"
+      "resources/fonts/*": "fonts/",
+      "resources/themes/*": "themes/"
     }
   }
 }

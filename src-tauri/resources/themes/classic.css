@@ -1,0 +1,42 @@
+@charset "UTF-8";
+
+/* 古风主题：衬线字体、宽行距、淡米色背景 */
+
+html, body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: "Noto Serif CJK SC", "Source Han Serif SC", "STSong", "SimSun", serif;
+  line-height: 2.0;
+  font-size: 1em;
+  margin: 0.8em 0;
+  text-align: justify;
+  background-color: #fdf6e3;
+  color: #3b2f1e;
+}
+
+h1 {
+  font-size: 1.5em;
+  text-align: center;
+  margin: 2em 0 1.2em 0;
+  font-weight: bold;
+  color: #5a3e28;
+  page-break-before: always;
+}
+
+p {
+  text-indent: 2em;
+  margin: 0.5em 0;
+}
+
+/* 卷分隔页 */
+h1.volume-title {
+  font-size: 2.4em;
+  margin: 40% 0 0 0;
+  text-align: center;
+  color: #5a3e28;
+  page-break-before: always;
+  page-break-after: always;
+}

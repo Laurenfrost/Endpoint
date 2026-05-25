@@ -429,6 +429,59 @@ pub async fn cancel_task(
     Ok(())
 }
 
+// ============== 阶段四 4.2:CSS 主题 ==============
+
+/// 列出可用主题名称列表(resource themes/ 目录下所有 .css 文件的 stem)。
+/// 顺序固定:standard → classic → highcontrast;其余按字母序追加。
+#[tauri::command]
+pub async fn list_themes(app: AppHandle) -> Result<Vec<String>, String> {
+    let themes_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("无法获取资源目录: {e}"))?
+        .join("themes");
+
+    let mut names: Vec<String> = std::fs::read_dir(&themes_dir)
+        .map_err(|e| format!("读取主题目录失败: {e}"))?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension()?.to_str()? == "css" {
+                Some(path.file_stem()?.to_str()?.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // 把内置三主题置前,其余按字母序
+    let priority = ["standard", "classic", "highcontrast"];
+    names.sort_by(|a, b| {
+        let ia = priority.iter().position(|&p| p == a).unwrap_or(usize::MAX);
+        let ib = priority.iter().position(|&p| p == b).unwrap_or(usize::MAX);
+        ia.cmp(&ib).then(a.cmp(b))
+    });
+    Ok(names)
+}
+
+/// 读取指定主题的 CSS 文本内容。`name` 不含 `.css` 扩展名。
+#[tauri::command]
+pub async fn load_theme(app: AppHandle, name: String) -> Result<String, String> {
+    // 防止路径穿越
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(format!("主题名称不合法: {name}"));
+    }
+    let path = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("无法获取资源目录: {e}"))?
+        .join("themes")
+        .join(format!("{name}.css"));
+
+    std::fs::read_to_string(&path)
+        .map_err(|e| format!("读取主题 {name} 失败: {e}"))
+}
+
 // ============== 阶段零兼容入口(回归保险,前端不再调用) ==============
 
 #[tauri::command]

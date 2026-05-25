@@ -70,6 +70,11 @@ export const buildEpub = ({ outputPath, title, author, kepubifyPath, decisions, 
 
 export const cancelTask = (taskId) => invoke("cancel_task", { taskId });
 
+/// 列出可用主题名称(standard/classic/highcontrast + 用户自定义)。
+export const listThemes = () => invoke("list_themes");
+/// 读取指定主题 CSS 文本内容。name 不含 .css 扩展名。
+export const loadTheme = (name) => invoke("load_theme", { name });
+
 /// 监听后台进度事件。payload 形状:
 ///   { task_id, stage, percent, detail }
 ///   stage ∈ "decoding" | "cleaning" | "chapter" | "watermark" | "epub" | "kepubify"

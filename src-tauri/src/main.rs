@@ -20,6 +20,9 @@ fn main() {
             commands::pick_executable_file,
             commands::pick_cover_file,
             commands::pick_font_file,
+            // 阶段四 4.2:CSS 主题
+            commands::list_themes,
+            commands::load_theme,
             // 阶段零兼容入口(回归保险)
             commands::convert,
         ])
