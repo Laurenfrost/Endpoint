@@ -272,56 +272,63 @@ LLM 客户端定义为可替换的接口（Rust trait）。核心库依赖「能
 3. **`fullwidth_space` snake_case 已消失**:拆为 `leading_fullwidth_space`(段首)+ `inline_fullwidth_space`(行内连续 ≥2)。v2 唯一一处刻意契约破坏
 4. **用户决策仅本次会话**:不持久化,reload 即丢;持久化版本(规则回流)是阶段四的事
 
-### 阶段四:LLM 兜底 + 规则回流 + 导出精修
+### 阶段四:LLM 兜底 + 规则回流 + 导出精修 — ✅ 已完成(4.0–4.8)
 
 **目标**:把"前面几阶段刻意推迟的高风险 / 可选 / 重 UI"功能补齐。LLM 是可选增强——所有功能必须保持**没有 LLM 也能完整工作**(CLAUDE.md 第三节第 4 条)。
 
-**核心方向**(按从底到上、低风险到高风险排序):
+**子阶段完成情况**:
+- **4.0** 封面嵌入 + CSS 覆盖接口 ✅
+- **4.1** 字体嵌入 opt-in(霞鹜文楷内置 + 用户自定义路径)✅
+- **4.2** CSS 主题预设(standard/classic/highcontrast)+ 高级 CSS 编辑器 ✅
+- **4.3** 文字封面自动生成(`cover_gen.rs`,两种风格,CJK 渲染)✅
+- **4.4** 超长章节结构检测(本地中位数算法,无 LLM)✅
+- **4.5** LLM 客户端模块(`LlmClient` trait + `OpenAiCompatibleClient` + `config.toml`)✅
+- **4.6** LLM 元数据建议(从正文前 1 万字推断书名/作者/简介)✅
+- **4.7** LLM 水印仲裁(批量 + 单条,结果原地 patch pipeline.dto)✅
+- **4.8** 规则回流(归纳 → `rules.json` 持久化 → 下次分析自动合并)✅
 
-1. **LLM 客户端模块**(纯 Rust trait + 1-2 个具体实现 + 配置入口)
-   - trait `LlmClient`,核心库依赖此抽象;`NoopLlmClient` 实现给"未配 API key"场景
-   - 至少接入 Anthropic Claude(用户使用频次最高);OpenAI 兼容接口可二期
-   - API key 存放:OS keychain 优先,fallback 到本地配置文件(明文 + 警告)
-   - 前端 Stage 1 或独立设置面板给"配置 LLM 提供商 + API key + 模型选型"入口
+**详情** `docs/stage4-design.md`(子阶段 + 契约扩展 + 真机 checklist 真相源)。
 
-2. **LLM 灰区仲裁**(消费 v2 的 suspect 列表)
-   - 把 watermark suspect 行 + 上下文 batch 发给 LLM,返回 verdict(是水印 / 是正文)+ 解释
-   - 章节解析的超长区间补漏(原 CLAUDE.md 第六节阶段三描述但 v1/v2 未做)
-   - 元数据抓取(从前 N 章正文里推断书名 / 作者,与用户填的元数据比对)
+**实际交付**:
+- 核心库新增 `llm` 模块:`LlmClient` trait(3 方法)/ `NoopLlmClient` / `AdjudicationVerdict { IsWatermark{reason}, IsContent, Uncertain }` / `MetadataSuggestion` / `WatermarkCandidate`
+- 核心库 `domain.rs`:`WatermarkSignalKind::LlmAdjudication` 新变体(snake_case `llm_adjudication`)
+- 核心库 `cover_gen.rs`:PNG 封面生成(`image` + `ab_glyph`,两种渐变风格,CJK 字体渲染)
+- 核心库 `chapter.rs`:`detect_oversized_chapters`(中位数 × 2.5 阈值,Structural origin 子章)
+- 桥接层新增 `openai_client.rs`(`reqwest blocking`,POST `/v1/chat/completions`,3 个 LLM 方法实现)
+- 桥接层新增 `llm_config.rs`(`%APPDATA%\Endpoint\config.toml` 读写 + `user_rules_path()`)
+- 桥接层 `state.rs`:`AppState.llm_client: Mutex<Box<dyn LlmClient>>`(startup 从 config 初始化)
+- 桥接层新增 Tauri 命令:`get_llm_config` / `set_llm_config` / `suggest_metadata` / `adjudicate_watermarks` / `induce_watermark_rule` / `save_induced_rule` / `list_themes` / `load_theme` / `generate_text_cover`
+- `load_and_analyze` 自动合并 `rules.json`(若存在);`build_epub` 支持封面/CSS覆盖/字体嵌入
+- 前端新增 `ui/src/stores/llm.svelte.js`:LLM 配置 reactive store
+- `ActivityBar.svelte`:底部 LLM 状态圆点(灰/绿)
+- `Stage4Export.svelte`:封面选择/文字封面生成/主题选择/CSS编辑器/LLM设置/元数据建议
+- `Stage2Cleaning.svelte`:LLM 仲裁按钮(批量 + 单条)+ 规则归纳流程 + 规则预览面板
+- 测试统计:128 个核心库测试全绿(含 cover_gen 2 个 / chapter 超长检测 2 个);`npm run build` 干净
 
-3. **规则回流**(把决策抽象成可复用规则)
-   - 用户决策(尤其 watermark 拒绝)经 LLM 归纳 → 生成 `RuleKind::Watermark` 规则
-   - 存回 `RuleSet.json`(`source: RuleSource::LlmGenerated`),下次扫描自动跳过同类
-   - 把"仅本次会话决策"升级为"持久化偏好"
+**阶段四关键设计决策**(后续开发须遵守):
+1. **LLM 客户端持锁调用**:个人工具可接受,阻塞一个 tokio 线程 ≤30s;`spawn_blocking` 移动 MutexGuard 在 Rust 中不可行,故直接持锁
+2. **规则文件路径**:`%APPDATA%\Endpoint\rules.json`(非 `data_local_dir`);与 `config.toml` 同目录
+3. **AdjudicationVerdict 携带 reason**:选择 `IsWatermark { reason: String }` 而非 unit 变体,让 reason 文本可在 signal detail 中展示
+4. **前端 patch 而非重取**:`adjudicateWatermarks` 返回局部 diff,前端原地 patch `pipeline.dto` 而非重新 `load_and_analyze`
+5. **归纳规则正则预校验**:桥接层 `induce_rule` 实现中调 `regex::Regex::new` 验证后再包装成 Rule;编译失败则返回 None
 
-4. **导出精修**
-   - **字体嵌入**:默认思源宋体 / 思源黑体(Source Han / Noto CJK)放进 epub zip + CSS `@font-face`(完整字体先,子集化推后)
-   - **CSS 主题预设**:3-5 套预设(标准 / 古风 / 高对比度 / ...)+ 高级用户可直接编辑源码
-   - **封面 UI**:Stage4 加封面图片选择 / 预览 / 进 EPUB manifest;`Metadata.cover: Option<Vec<u8>>` 已预留
-   - **元数据编辑增强**:简介(Description)/ 出版社 / ISBN 等可选字段
-   - **kepubify 选项暴露**:目前只能"开/关",可考虑暴露常用 CLI flags
+**已知技术债**(未在阶段四解决):
+- VirtualText 行高靠估算,长段落可能略超槽位(用户未反映问题,暂不补 ResizeObserver)
+- Cancel 接口预留但未实装(`TODO(cancel)` 散落核心库)
+- 字体子集化(体积大但合法;后期迭代)
+- OpenAI-compatible 以外的 provider(如 Anthropic 原生 API)
 
-5. **测试样本回流 + 微调默认**
-   - 用户多本网文实测后,如发现误删率 / 漏删率不平衡,微调 `WatermarkConfig::default()` 与
-     `builtin_rules()` 中的 watermark 规则集
-   - 阈值默认调整记录回写 `docs/stage3-v2-design.md` 第二节决策表(沿用 v2 决策 10/11 风格)
-
-**已知技术债**(可在阶段四顺手清,也可不动):
-- VirtualText 行高靠估算,长段落实际渲染可能略超估算槽位——若用户没遇到明显问题,可不加 ResizeObserver
-- Cancel 接口预留但未实装(`TODO(cancel)` 散落核心库)——若没遇到需要中断的场景,可不补
-- 字体子集化(原约定 v1 / v2 不做,体积大但简单)
-
-**禁区**:
+**禁区**(阶段四后同样适用):
 - 不动阶段二契约(`Span` / `Chapter.heading_span` / `Volume.heading_span` / `BookEntry` 枚举形状)
 - 不动阶段三 v2 契约(`CleaningKind` 8 项 / `WatermarkAnnotation` / `UserDecision` 3 类型)
-- 不动 `VirtualText` / `OverviewRuler` / 三栏骨架核心交互(Stage4 内部可改、Stage1/2/3 不动)
-- LLM 不得变为强依赖——所有功能必须可降级到"未配 API key"路径
+- 不动 `VirtualText` / `OverviewRuler` / 三栏骨架核心交互
+- LLM 不得变为强依赖——所有功能必须可降级到 `NoopLlmClient` 路径
 
 ---
 
 ## 十二、给 Claude Code 的工作约定
 
-- 动手前确认当前处于路线图哪个阶段,不要跨阶段实现未到的功能。**阶段三 v2 已完成,当前在阶段四**。
+- 动手前确认当前处于路线图哪个阶段,不要跨阶段实现未到的功能。**阶段四(4.0–4.8)已全部完成。如有新功能需求,需先与用户讨论是否开启阶段五。**
 - 任何核心库代码不得 import Tauri 或前端相关依赖,保持核心库可独立编译与测试。
 - 为核心库的每个模块编写单元测试,尤其编码探测、章节解析、水印检测——这些逻辑密集且易回归。
 - **富标注输出契约**:
@@ -343,8 +350,8 @@ LLM 客户端定义为可替换的接口（Rust trait）。核心库依赖「能
   未配 API key 时塞 `NoopLlmClient`,所有依赖 LLM 的功能(灰区仲裁 / 规则回流 /
   元数据抓取)都必须可降级到"无 LLM 路径"。
 - **用户决策语义**(阶段三 v2.2 起):决策仅本次会话有效(`UserDecision` 不持久化);
-  持久化版本是规则回流——**只在阶段四做**——把 reject 模式抽象为
-  `RuleKind::Watermark` 规则 + `source: LlmGenerated`,存回 `RuleSet.json`。
+  持久化版本是规则回流(阶段四 4.8 已完成)——把 reject 模式抽象为
+  `RuleKind::Watermark` 规则 + `source: LlmGenerated`,存回 `%APPDATA%\Endpoint\rules.json`。
 - 提交信息和注释使用中文或英文均可,保持与现有代码一致。
 - **不动阶段二骨架**:`VirtualText` / `OverviewRuler` / `ActivityBar` / `Sidebar` /
   四阶段切换的核心交互。阶段三 v2 末尾这些组件已稳定,阶段四的新功能(封面预览 /
