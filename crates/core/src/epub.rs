@@ -12,6 +12,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
+use tracing::debug;
 use zip::write::{FileOptions, ZipWriter};
 use zip::CompressionMethod;
 
@@ -180,6 +181,13 @@ pub fn build(book: &Book, out_path: &Path, opts: &EpubOptions<'_>) -> Result<(),
     let sections = collect_sections(&book.entries);
     let uid = generate_uid(book);
     let modified = format_modified();
+    debug!(
+        sections = sections.len(),
+        has_cover,
+        css_override = opts.css_override.is_some(),
+        font_embed = opts.font_bytes.is_some(),
+        "EPUB 写入开始"
+    );
 
     for s in &sections {
         zw.start_file(format!("OEBPS/{}", s.href), deflated)?;

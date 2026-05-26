@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use thiserror::Error;
+use tracing::{debug, warn};
 
 #[derive(Debug, Error)]
 pub enum KepubifyError {
@@ -37,20 +38,31 @@ pub fn run(
     input_epub: &Path,
     output_dir: &Path,
 ) -> Result<PathBuf, KepubifyError> {
+    debug!(
+        exe = %kepubify_exe.display(),
+        input = %input_epub.display(),
+        out_dir = %output_dir.display(),
+        "调用 kepubify"
+    );
     let output = Command::new(kepubify_exe)
         .arg("-o")
         .arg(output_dir)
         .arg(input_epub)
         .output()
-        .map_err(|e| KepubifyError::Spawn {
-            path: kepubify_exe.display().to_string(),
-            source: e,
+        .map_err(|e| {
+            warn!(error = %e, exe = %kepubify_exe.display(), "kepubify 进程启动失败");
+            KepubifyError::Spawn {
+                path: kepubify_exe.display().to_string(),
+                source: e,
+            }
         })?;
 
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        warn!(code = ?output.status.code(), stderr = %stderr, "kepubify 退出码非零");
         return Err(KepubifyError::NonZero {
             code: output.status.code(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stderr,
         });
     }
 

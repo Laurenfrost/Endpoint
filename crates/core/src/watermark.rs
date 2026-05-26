@@ -23,6 +23,7 @@ use std::collections::{HashMap, HashSet};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, trace};
 
 use crate::domain::{
     Book, BookEntry, CleaningAnnotation, CleaningKind, DecisionScope, DecisionVerdict, Span,
@@ -110,6 +111,7 @@ pub fn analyze(
     config: &WatermarkConfig,
 ) -> Vec<WatermarkAnnotation> {
     if !config.enabled {
+        debug!("水印检测被禁用,跳过");
         return Vec::new();
     }
 
@@ -117,6 +119,15 @@ pub fn analyze(
 
     // 一次性切行 + 缓存复用(两遍扫描共用同一份)。
     let lines = iter_lines(source);
+    debug!(
+        lines = lines.len(),
+        heading_starts = heading_starts.len(),
+        auto_threshold = config.auto_threshold,
+        suspect_threshold = config.suspect_threshold,
+        repeat_count_min = config.repeat_count_min,
+        min_line_chars = config.min_line_chars,
+        "水印扫描开始"
+    );
 
     // —— 第一遍:行频统计 ——
     // 只统计 eligible 行(跳过 heading / 空行 / 短行),避免章节标题被计入。
@@ -136,6 +147,11 @@ pub fn analyze(
         .into_iter()
         .filter_map(|r| r.compile().ok().map(|re| (r.id.clone(), re)))
         .collect();
+    debug!(
+        eligible_unique_lines = count_by_trimmed.len(),
+        watermark_rules = compiled.len(),
+        "行频统计与规则编译完成"
+    );
 
     // —— 第二遍:逐行三特征计算 + 融合 + 分流 ——
     let mut out: Vec<WatermarkAnnotation> = Vec::new();
@@ -201,6 +217,14 @@ pub fn analyze(
             continue;
         };
 
+        trace!(
+            line_start,
+            line_end,
+            ?verdict,
+            score,
+            signal_count = signals.len(),
+            "水印命中"
+        );
         out.push(WatermarkAnnotation {
             span: Span::new(line_start, line_end),
             verdict,
@@ -356,6 +380,12 @@ pub fn apply_user_decisions(
     watermarks: &[WatermarkAnnotation],
     decisions: &[UserDecision],
 ) -> Vec<CleaningAnnotation> {
+    debug!(
+        decision_count = decisions.len(),
+        cleaning_in = cleaning.len(),
+        watermarks_in = watermarks.len(),
+        "应用用户决策"
+    );
     // 按 (start, end) 索引三类逆向决策
     let mut cleaning_rejected: HashSet<(usize, usize)> = HashSet::new();
     let mut wm_rejected: HashSet<(usize, usize)> = HashSet::new();

@@ -9,6 +9,7 @@ use endpoint_core::llm::{
 use endpoint_core::rules::{Rule, RuleKind, RuleSource};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
+use tracing::{debug, info, trace, warn};
 
 pub struct OpenAiCompatibleClient {
     base_url: String,
@@ -42,25 +43,60 @@ impl OpenAiCompatibleClient {
             "max_tokens": 512,
         });
 
+        info!(
+            url = %url,
+            model = %self.model,
+            system_chars = system.chars().count(),
+            user_chars = user.chars().count(),
+            "LLM 请求开始"
+        );
+        // 完整 prompt 仅在 trace 级输出(可能含用户文本)
+        trace!(system_prompt = system, user_prompt = user, "完整 prompt");
+
+        let started = std::time::Instant::now();
         let resp = self
             .client
             .post(&url)
             .bearer_auth(&self.api_key)
             .json(&body)
             .send()
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(|e| {
+                warn!(error = %e, elapsed_ms = started.elapsed().as_millis() as u64, "LLM 请求网络层失败");
+                LlmError::Http(e.to_string())
+            })?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
+        let status = resp.status();
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+
+        if !status.is_success() {
             let text = resp.text().unwrap_or_default();
+            warn!(
+                status = %status,
+                elapsed_ms,
+                body_preview = %text.chars().take(200).collect::<String>(),
+                "LLM 请求非 2xx"
+            );
             return Err(LlmError::Http(format!("HTTP {status}: {text}")));
         }
 
-        let json: Value = resp.json().map_err(|e| LlmError::Parse(e.to_string()))?;
+        let json: Value = resp.json().map_err(|e| {
+            warn!(error = %e, elapsed_ms, "LLM 响应 JSON 解析失败");
+            LlmError::Parse(e.to_string())
+        })?;
         let content = json["choices"][0]["message"]["content"]
             .as_str()
-            .ok_or_else(|| LlmError::Parse("响应中未找到 content 字段".into()))?
+            .ok_or_else(|| {
+                warn!(elapsed_ms, "LLM 响应 choices[0].message.content 缺失");
+                LlmError::Parse("响应中未找到 content 字段".into())
+            })?
             .to_string();
+        info!(
+            status = %status,
+            elapsed_ms,
+            response_chars = content.chars().count(),
+            "LLM 请求完成"
+        );
+        trace!(response = %content, "完整响应");
         Ok(content)
     }
 }
@@ -70,6 +106,7 @@ impl LlmClient for OpenAiCompatibleClient {
         &self,
         candidates: &[WatermarkCandidate],
     ) -> Result<Vec<AdjudicationVerdict>, LlmError> {
+        debug!(candidates = candidates.len(), "arbitrate_watermark");
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
@@ -122,10 +159,21 @@ impl LlmClient for OpenAiCompatibleClient {
         while verdicts.len() < candidates.len() {
             verdicts.push(AdjudicationVerdict::Uncertain);
         }
+        let watermark = verdicts
+            .iter()
+            .filter(|v| matches!(v, AdjudicationVerdict::IsWatermark { .. }))
+            .count();
+        let content = verdicts
+            .iter()
+            .filter(|v| matches!(v, AdjudicationVerdict::IsContent))
+            .count();
+        let uncertain = verdicts.len() - watermark - content;
+        debug!(watermark, content, uncertain, "arbitrate_watermark 解析完成");
         Ok(verdicts)
     }
 
     fn induce_rule(&self, rejected_lines: &[&str]) -> Result<Option<Rule>, LlmError> {
+        debug!(samples = rejected_lines.len(), "induce_rule");
         if rejected_lines.is_empty() {
             return Ok(None);
         }
@@ -144,11 +192,13 @@ impl LlmClient for OpenAiCompatibleClient {
 
         let raw = self.chat(system, &user)?.trim().to_string();
         if raw.is_empty() {
+            debug!("induce_rule: LLM 返回空字符串");
             return Ok(None);
         }
 
         // 验证正则能编译,否则丢弃
-        if regex::Regex::new(&raw).is_err() {
+        if let Err(e) = regex::Regex::new(&raw) {
+            warn!(pattern = %raw, error = %e, "induce_rule: LLM 返回的正则无法编译,丢弃");
             return Ok(None);
         }
 
@@ -175,6 +225,7 @@ impl LlmClient for OpenAiCompatibleClient {
     fn suggest_metadata(&self, sample_text: &str) -> Result<Option<MetadataSuggestion>, LlmError> {
         let char_limit = 10000;
         let sample: String = sample_text.chars().take(char_limit).collect();
+        debug!(sample_chars = sample.chars().count(), "suggest_metadata");
         let system = "你是中文网络小说电子书制作助手。从给定章节文本推断书名、作者、简介和封面关键词。\
             输出格式(每行一项,未知的项写「未知」):\n\
             书名: XXX\n\

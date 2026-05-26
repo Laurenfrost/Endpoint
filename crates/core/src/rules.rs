@@ -20,6 +20,7 @@ use std::path::Path;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::{debug, warn};
 
 #[derive(Debug, Error)]
 pub enum RulesError {
@@ -107,9 +108,12 @@ impl Rule {
 
     /// 编译 `pattern`。失败附带 rule id 以便排错。
     pub fn compile(&self) -> Result<Regex, RulesError> {
-        Regex::new(&self.pattern).map_err(|e| RulesError::BadRegex {
-            id: self.id.clone(),
-            source: e,
+        Regex::new(&self.pattern).map_err(|e| {
+            warn!(rule_id = %self.id, pattern = %self.pattern, error = %e, "规则正则编译失败");
+            RulesError::BadRegex {
+                id: self.id.clone(),
+                source: e,
+            }
         })
     }
 }
@@ -163,9 +167,17 @@ impl RuleSet {
 
     /// 合并:把 `other` 中的规则按 id 追加/覆盖到 self。常用法:用户规则覆盖内置同 id 规则。
     pub fn merge(&mut self, other: RuleSet) {
+        let before = self.rules.len();
+        let incoming = other.rules.len();
         for r in other.rules {
             self.upsert(r);
         }
+        debug!(
+            before,
+            incoming,
+            after = self.rules.len(),
+            "规则集合并"
+        );
     }
 
     pub fn load_from_json(path: &Path) -> Result<Self, RulesError> {
@@ -173,10 +185,12 @@ impl RuleSet {
             path: path.display().to_string(),
             source: e,
         })?;
-        serde_json::from_str(&s).map_err(|e| RulesError::Parse {
+        let set: Self = serde_json::from_str(&s).map_err(|e| RulesError::Parse {
             path: path.display().to_string(),
             source: e,
-        })
+        })?;
+        debug!(path = %path.display(), rules = set.rules.len(), "从 JSON 加载规则集");
+        Ok(set)
     }
 
     pub fn save_to_json(&self, path: &Path) -> Result<(), RulesError> {

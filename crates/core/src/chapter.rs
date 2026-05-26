@@ -23,6 +23,7 @@
 
 use regex::Regex;
 use thiserror::Error;
+use tracing::{debug, warn};
 
 use crate::cleaning;
 use crate::domain::{
@@ -96,8 +97,19 @@ pub fn parse(source: &str, rules: &RuleSet, metadata: Metadata) -> Result<Book, 
 
     // 兜底:整本未识别出任何候选。
     if candidates.is_empty() {
+        warn!(
+            source_bytes = source.len(),
+            "未识别出任何章节标题,启用单章 fallback"
+        );
         return Ok(fallback_book(source, metadata));
     }
+
+    let vol_count = candidates
+        .iter()
+        .filter(|c| c.level == HeadingLevel::Volume)
+        .count();
+    let ch_count = candidates.len() - vol_count;
+    debug!(volumes = vol_count, chapters = ch_count, "候选标题扫描完成");
 
     // 第二阶段:卷章层级组织。
     let mut entries: Vec<BookEntry> = Vec::new();
@@ -309,7 +321,7 @@ fn fallback_book(source: &str, metadata: Metadata) -> Book {
 ///
 /// 条件不满足时(章节数 < 2,或中位数为 0)静默返回,不修改 book。
 fn detect_oversized_chapters(book: &mut Book, source: &str, rules: &RuleSet, median_factor: f32) {
-    // 收集所有章节的 body 字符数
+    let entries_before = book.entries.len();
     let mut char_counts: Vec<usize> = Vec::new();
     for entry in &book.entries {
         match entry {
@@ -332,6 +344,7 @@ fn detect_oversized_chapters(book: &mut Book, source: &str, rules: &RuleSet, med
         return;
     }
     let threshold = (median as f32 * median_factor) as usize;
+    debug!(median, threshold, factor = median_factor, "超长章节阈值");
 
     let chapter_rules = compile_rules(rules, RuleKind::Chapter).unwrap_or_default();
 
@@ -368,6 +381,14 @@ fn detect_oversized_chapters(book: &mut Book, source: &str, rules: &RuleSet, med
                 }));
             }
         }
+    }
+    let entries_after = new_entries.len();
+    if entries_after != entries_before {
+        warn!(
+            from = entries_before,
+            to = entries_after,
+            "检测到超长章节,已按内嵌标题拆分"
+        );
     }
     book.entries = new_entries;
 }

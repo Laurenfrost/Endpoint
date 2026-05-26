@@ -6,8 +6,12 @@ mod openai_client;
 mod state;
 
 use state::AppState;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 fn main() {
+    init_tracing();
+    tracing::info!("endpoint-app 启动");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
@@ -42,4 +46,25 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
+}
+
+/// 装配 tracing 订阅器。
+///
+/// 默认级别 `info`；通过环境变量 `RUST_LOG` 可临时调整（例：
+/// `RUST_LOG=endpoint_core::watermark=debug,endpoint_app=debug`）。
+/// 当前只输出到 stdout；后续若需要文件/UI 面板，加 Layer 即可，业务代码不动。
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,endpoint_core=info,endpoint_app=info"));
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            fmt::layer()
+                .with_target(true)
+                .with_thread_ids(false)
+                .with_thread_names(false)
+                .with_ansi(true),
+        )
+        .init();
 }

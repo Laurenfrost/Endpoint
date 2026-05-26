@@ -26,6 +26,7 @@ use std::path::Path;
 use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
 use thiserror::Error;
+use tracing::{debug, warn};
 
 #[derive(Debug, Error)]
 pub enum EncodingError {
@@ -59,6 +60,7 @@ pub fn decode(
     let (encoding, payload) = pick_encoding(bytes, override_label)?;
     let (cow, _, had_errors) = encoding.decode(payload);
     if had_errors {
+        warn!(label = encoding.name(), "解码遇到非法字节序列");
         return Err(EncodingError::Malformed {
             label: encoding.name().to_string(),
         });
@@ -82,34 +84,34 @@ fn pick_encoding<'a>(
     bytes: &'a [u8],
     override_label: Option<&str>,
 ) -> Result<(&'static Encoding, &'a [u8]), EncodingError> {
-    // 手动覆盖最高优先级。同时仍去 BOM:用户指定了 UTF-8,但文件带 BOM,也应当剥掉。
     if let Some(label) = override_label {
         let enc = Encoding::for_label(label.as_bytes())
             .ok_or_else(|| EncodingError::UnknownLabel(label.to_string()))?;
+        debug!(label, resolved = enc.name(), "手动覆盖编码");
         return Ok((enc, strip_bom_for(enc, bytes)));
     }
 
-    // BOM sniff:UTF-8 / UTF-16 LE / UTF-16 BE。`encoding_rs::Encoding::for_bom` 会
-    // 自动识别这三种 BOM 并返回(encoding, bom_len)。
     if let Some((enc, bom_len)) = Encoding::for_bom(bytes) {
+        debug!(encoding = enc.name(), bom_len, "BOM 探测命中");
         return Ok((enc, &bytes[bom_len..]));
     }
 
-    // 启发式探测。chardetng 接受 `tld` 提示,中文网文给 None 即可。
     let mut detector = EncodingDetector::new();
     detector.feed(bytes, true);
-    let enc = detector.guess(None, true);
+    let guessed = detector.guess(None, true);
 
-    // chardetng 在面对纯 ASCII 时可能返回 windows-1252;中文文件不会走到这里,但保险起见
-    // 如果探测结果与 UTF-8 等价(纯 ASCII),直接当 UTF-8 处理。
-    let enc = if enc == encoding_rs::WINDOWS_1252 && bytes.iter().all(|b| *b < 0x80) {
+    let enc = if guessed == encoding_rs::WINDOWS_1252 && bytes.iter().all(|b| *b < 0x80) {
         encoding_rs::UTF_8
-    } else if enc == encoding_rs::GBK {
-        // GB18030 是 GBK 的严格超集,统一用 GB18030 解码,避免漏掉 GBK 之外的中文。
+    } else if guessed == encoding_rs::GBK {
         encoding_rs::GB18030
     } else {
-        enc
+        guessed
     };
+    debug!(
+        guessed = guessed.name(),
+        chosen = enc.name(),
+        "chardetng 启发式探测"
+    );
 
     Ok((enc, strip_bom_for(enc, bytes)))
 }

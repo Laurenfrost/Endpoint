@@ -13,6 +13,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use tracing::{debug, info};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LlmConfig {
@@ -66,8 +67,14 @@ pub fn save(cfg: &LlmConfig) -> Result<(), String> {
 /// 根据配置构造 LLM 客户端。api_key 或 base_url 为空时返回 `NoopLlmClient`。
 pub fn create_client(cfg: &LlmConfig) -> Box<dyn endpoint_core::llm::LlmClient> {
     if cfg.api_key.is_empty() || cfg.base_url.is_empty() {
+        debug!(
+            base_url_set = !cfg.base_url.is_empty(),
+            key_set = !cfg.api_key.is_empty(),
+            "LLM 未完整配置,使用 NoopLlmClient"
+        );
         Box::new(endpoint_core::llm::NoopLlmClient)
     } else {
+        info!(base_url = %cfg.base_url, model = %cfg.model, "构造 OpenAI 兼容 LLM 客户端");
         Box::new(crate::openai_client::OpenAiCompatibleClient::new(
             cfg.base_url.clone(),
             cfg.model.clone(),

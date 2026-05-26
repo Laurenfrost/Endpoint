@@ -30,6 +30,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::domain::{CleaningAnnotation, CleaningKind, Span};
 
@@ -113,6 +114,33 @@ pub fn analyze(text: &str, config: &CleaningConfig) -> Vec<CleaningAnnotation> {
     // 但保留兜底以维持「非重叠」不变式)。
     anns.sort_by_key(|a| (a.span.start, a.span.end));
     dedup_contained(&mut anns);
+
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let mut counts: [(CleaningKind, u32); 5] = [
+            (CleaningKind::BlankLineCompression, 0),
+            (CleaningKind::LeadingFullwidthSpace, 0),
+            (CleaningKind::InlineFullwidthSpace, 0),
+            (CleaningKind::ControlChar, 0),
+            (CleaningKind::TrailingWhitespace, 0),
+        ];
+        for a in &anns {
+            for (k, c) in counts.iter_mut() {
+                if *k == a.kind {
+                    *c += 1;
+                    break;
+                }
+            }
+        }
+        debug!(
+            blank_line = counts[0].1,
+            leading_fw = counts[1].1,
+            inline_fw = counts[2].1,
+            control = counts[3].1,
+            trailing = counts[4].1,
+            total = anns.len(),
+            "cleaning 分布"
+        );
+    }
     anns
 }
 

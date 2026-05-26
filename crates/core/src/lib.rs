@@ -37,6 +37,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use thiserror::Error;
+use tracing::{debug, info, info_span};
 
 pub use crate::domain::{Metadata, PipelineOutput};
 pub use crate::rules::RuleSet;
@@ -124,49 +125,84 @@ pub fn run_pipeline(
     options: &ConvertOptions,
     progress: &dyn ProgressSink,
 ) -> Result<PipelineOutput, CoreError> {
+    let pipeline_span = info_span!(
+        "run_pipeline",
+        bytes_len = bytes.len(),
+        encoding_override = options.encoding_override.as_deref().unwrap_or("auto"),
+    );
+    let _enter = pipeline_span.enter();
+    info!("管线开始");
+
     progress.report("decoding", 0, None);
-    let (source_text, source_encoding) =
-        encoding::decode(bytes, options.encoding_override.as_deref())?;
+    let (source_text, source_encoding) = {
+        let _s = info_span!("decoding").entered();
+        let result = encoding::decode(bytes, options.encoding_override.as_deref())?;
+        info!(encoding = %result.1, chars = result.0.chars().count(), "解码完成");
+        result
+    };
     progress.report("decoding", 100, Some(&source_encoding));
 
     progress.report("cleaning", 0, None);
     let cleaning_config = options.cleaning.clone().unwrap_or_default();
-    let cleaning_anns_base = cleaning::analyze(&source_text, &cleaning_config);
+    let cleaning_anns_base = {
+        let _s = info_span!("cleaning").entered();
+        let anns = cleaning::analyze(&source_text, &cleaning_config);
+        info!(annotation_count = anns.len(), "清洗分析完成");
+        anns
+    };
     progress.report("cleaning", 100, None);
 
     progress.report("chapter", 0, None);
     let rules = match &options.rules_path {
         Some(p) => {
+            debug!(path = %p.display(), "加载用户规则并合并到内置规则");
             let mut set = RuleSet::builtin();
             set.merge(RuleSet::load_from_json(p)?);
             set
         }
-        None => RuleSet::builtin(),
+        None => {
+            debug!("仅使用内置规则");
+            RuleSet::builtin()
+        }
     };
 
-    let mut book = chapter::parse(&source_text, &rules, metadata)?;
+    let mut book = {
+        let _s = info_span!("chapter").entered();
+        let book = chapter::parse(&source_text, &rules, metadata)?;
+        info!(entry_count = book.entries.len(), "章节解析完成");
+        book
+    };
     progress.report("chapter", 100, None);
 
-    // 阶段三:水印检测。
     progress.report("watermark", 0, None);
     let wm_config = options.watermark.clone().unwrap_or_default();
-    let watermarks = watermark::analyze(
-        &source_text,
-        &book,
-        &rules,
-        &cleaning_anns_base,
-        &wm_config,
-    );
+    let watermarks = {
+        let _s = info_span!("watermark", enabled = wm_config.enabled).entered();
+        let wms = watermark::analyze(
+            &source_text,
+            &book,
+            &rules,
+            &cleaning_anns_base,
+            &wm_config,
+        );
+        let auto_count = wms
+            .iter()
+            .filter(|w| matches!(w.verdict, domain::WatermarkVerdict::Auto))
+            .count();
+        let suspect_count = wms.len() - auto_count;
+        info!(auto = auto_count, suspect = suspect_count, "水印检测完成");
+        wms
+    };
     progress.report("watermark", 100, None);
 
-    // auto 水印镜像 → cleaning:把 verdict==auto 的 watermark 同 span 写入 cleaning
-    // (用 WatermarkKeyword/Repetition/NonCjk 三个 CleaningKind 变体),
-    // suspect 不进 cleaning。详见 `docs/stage3-design.md` 第二节"镜像不变式"。
     let cleaning_final = watermark::merge_auto_into_cleaning(cleaning_anns_base, &watermarks);
+    debug!(
+        cleaning_final_len = cleaning_final.len(),
+        "auto 水印镜像合并完毕"
+    );
 
-    // 物化段落:此时 cleaning_final 已含格式清洗 + auto 水印镜像,
-    // 一次物化即可同时扣除两类删除,EPUB 路径单一不分支。
     chapter::materialize_paragraphs(&mut book, &source_text, &cleaning_final);
+    info!("段落物化完成,管线结束");
 
     Ok(PipelineOutput {
         source_text,
@@ -188,11 +224,24 @@ pub fn build_epub_from(
     epub_opts: &epub::EpubOptions<'_>,
     progress: &dyn ProgressSink,
 ) -> Result<PathBuf, CoreError> {
-    progress.report("epub", 0, None);
-    epub::build(&pipeline.book, output_epub, epub_opts)?;
-    progress.report("epub", 100, None);
+    let build_span = info_span!(
+        "build_epub_from",
+        output = %output_epub.display(),
+        kepubify = kepubify_path.is_some(),
+        embed_fonts = epub_opts.font_bytes.is_some(),
+    );
+    let _enter = build_span.enter();
+
+    {
+        let _s = info_span!("epub").entered();
+        progress.report("epub", 0, None);
+        epub::build(&pipeline.book, output_epub, epub_opts)?;
+        progress.report("epub", 100, None);
+        info!(path = %output_epub.display(), "EPUB 构建完成");
+    }
 
     if let Some(kepubify) = kepubify_path {
+        let _s = info_span!("kepubify", bin = %kepubify.display()).entered();
         progress.report("kepubify", 0, None);
         let out_dir = output_epub
             .parent()
@@ -200,6 +249,7 @@ pub fn build_epub_from(
             .unwrap_or_else(|| PathBuf::from("."));
         let kepub = kepubify::run(kepubify, output_epub, &out_dir)?;
         progress.report("kepubify", 100, None);
+        info!(path = %kepub.display(), "kepubify 完成");
         return Ok(kepub);
     }
     Ok(output_epub.to_path_buf())

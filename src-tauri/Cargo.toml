@@ -19,6 +19,8 @@ reqwest = { version = "0.12", features = ["blocking", "json"] }
 toml = "0.8"
 dirs = "5"
 regex = "1"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [[bin]]
 name = "endpoint-app"

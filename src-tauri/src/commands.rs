@@ -36,6 +36,7 @@ use endpoint_core::llm::AdjudicationVerdict;
 use serde::Serialize;
 use tauri::{async_runtime, AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
+use tracing::{debug, info, warn};
 
 use crate::state::{AppState, CachedPipeline};
 
@@ -191,6 +192,12 @@ pub async fn load_and_analyze(
     watermark_config: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     let task_id = state.next_task_id("load");
+    info!(
+        task_id = %task_id,
+        input = %input_path,
+        encoding_override = encoding_override.as_deref().unwrap_or("auto"),
+        "load_and_analyze 开始"
+    );
     let cancel_flag = state.register_cancel(&task_id);
 
     // 阶段三 v2:把前端传的 cleaning_config / watermark_config(JSON 对象)
@@ -216,8 +223,11 @@ pub async fn load_and_analyze(
     let task_id_for_blocking = task_id.clone();
 
     let pipeline_result = async_runtime::spawn_blocking(move || {
-        let bytes = std::fs::read(&path_for_blocking)
-            .map_err(|e| format!("读取文件失败({path_for_blocking}): {e}"))?;
+        let bytes = std::fs::read(&path_for_blocking).map_err(|e| {
+            warn!(error = %e, task_id = %task_id_for_blocking, "读取文件失败");
+            format!("读取文件失败({path_for_blocking}): {e}")
+        })?;
+        debug!(bytes = bytes.len(), task_id = %task_id_for_blocking, "文件读取完成,进入核心管线");
         // 4.8:若用户已保存过 LLM 归纳规则,自动合并进分析(save_induced_rule 写到同目录)
         let user_rules = crate::llm_config::user_rules_path().filter(|p| p.exists());
         let options = ConvertOptions {
@@ -244,11 +254,25 @@ pub async fn load_and_analyze(
     state.unregister_cancel(&task_id);
 
     let pipeline: PipelineOutput = pipeline_result
-        .map_err(|e| format!("任务调度失败: {e}"))?
-        .map_err(|e| format!("解析失败: {e}"))?;
+        .map_err(|e| {
+            warn!(error = %e, task_id = %task_id, "任务调度失败");
+            format!("任务调度失败: {e}")
+        })?
+        .map_err(|e| {
+            warn!(error = %e, task_id = %task_id, "管线解析失败");
+            format!("解析失败: {e}")
+        })?;
 
     let dto = serde_json::to_value(&pipeline)
         .map_err(|e| format!("序列化 PipelineOutput 失败: {e}"))?;
+    info!(
+        task_id = %task_id,
+        encoding = %pipeline.source_encoding,
+        cleaning = pipeline.cleaning.len(),
+        watermark = pipeline.watermark.len(),
+        entries = pipeline.book.entries.len(),
+        "load_and_analyze 完成"
+    );
 
     *state
         .pipeline
@@ -354,6 +378,15 @@ pub async fn build_epub(
     };
 
     let task_id = state.next_task_id("build");
+    info!(
+        task_id = %task_id,
+        output = %output_path,
+        kepubify = kepubify_path.is_some(),
+        decisions = decisions_typed.len(),
+        embed_fonts = embed_fonts.unwrap_or(false),
+        has_cover = cover_bytes.is_some(),
+        "build_epub 开始"
+    );
     let _cancel_flag = state.register_cancel(&task_id);
 
     let app_for_sink = app.clone();
@@ -410,9 +443,16 @@ pub async fn build_epub(
     state.unregister_cancel(&task_id);
 
     let final_path = build_result
-        .map_err(|e| format!("任务调度失败: {e}"))?
-        .map_err(|e| format!("构建失败: {e}"))?;
+        .map_err(|e| {
+            warn!(error = %e, task_id = %task_id, "build 任务调度失败");
+            format!("任务调度失败: {e}")
+        })?
+        .map_err(|e| {
+            warn!(error = %e, task_id = %task_id, "EPUB 构建失败");
+            format!("构建失败: {e}")
+        })?;
 
+    info!(task_id = %task_id, path = %final_path.display(), "build_epub 完成");
     Ok(final_path.display().to_string())
 }
 
@@ -431,6 +471,9 @@ pub async fn cancel_task(
         .map_err(|e| format!("cancel_flags 锁中毒: {e}"))?;
     if let Some(flag) = guard.get(&task_id) {
         flag.store(true, Ordering::Relaxed);
+        warn!(task_id = %task_id, "用户取消任务");
+    } else {
+        debug!(task_id = %task_id, "取消时未找到对应任务标志,可能已完成");
     }
     Ok(())
 }
@@ -592,6 +635,12 @@ pub async fn set_llm_config(
         model: model.trim().to_string(),
         api_key: api_key.trim().to_string(),
     };
+    info!(
+        base_url = %cfg.base_url,
+        model = %cfg.model,
+        key_set = !cfg.api_key.is_empty(),
+        "保存 LLM 配置"
+    );
     crate::llm_config::save(&cfg)?;
     let new_client = crate::llm_config::create_client(&cfg);
     *state
@@ -609,6 +658,7 @@ pub async fn set_llm_config(
 /// `LlmError::NotConfigured` 静默转 `Ok(null)`,其余错误返回 `Err`。
 #[tauri::command]
 pub async fn suggest_metadata(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    info!("suggest_metadata 开始");
     // 从缓存取 source_text
     let sample_text = {
         let guard = state
@@ -640,15 +690,32 @@ pub async fn suggest_metadata(state: State<'_, AppState>) -> Result<serde_json::
 
     use endpoint_core::llm::LlmError;
     match suggestion_result {
-        Ok(None) => Ok(serde_json::Value::Null),
-        Ok(Some(s)) => Ok(serde_json::json!({
-            "title":          s.title,
-            "author":         s.author,
-            "description":    s.description,
-            "cover_keywords": s.cover_keywords,
-        })),
-        Err(LlmError::NotConfigured) => Ok(serde_json::Value::Null),
-        Err(e) => Err(format!("LLM 调用失败: {e}")),
+        Ok(None) => {
+            info!("suggest_metadata 完成: LLM 未返回建议");
+            Ok(serde_json::Value::Null)
+        }
+        Ok(Some(s)) => {
+            info!(
+                has_title = s.title.is_some(),
+                has_author = s.author.is_some(),
+                has_description = s.description.is_some(),
+                "suggest_metadata 完成"
+            );
+            Ok(serde_json::json!({
+                "title":          s.title,
+                "author":         s.author,
+                "description":    s.description,
+                "cover_keywords": s.cover_keywords,
+            }))
+        }
+        Err(LlmError::NotConfigured) => {
+            debug!("LLM 未配置,suggest_metadata 静默返回 null");
+            Ok(serde_json::Value::Null)
+        }
+        Err(e) => {
+            warn!(error = %e, "suggest_metadata LLM 调用失败");
+            Err(format!("LLM 调用失败: {e}"))
+        }
     }
 }
 
@@ -689,6 +756,7 @@ pub async fn adjudicate_watermarks(
     state: State<'_, AppState>,
     spans: Vec<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
+    info!(spans = spans.len(), "adjudicate_watermarks 开始");
     if spans.is_empty() {
         return Ok(serde_json::json!({ "updated_watermarks": [], "new_cleaning": [] }));
     }
@@ -748,6 +816,7 @@ pub async fn adjudicate_watermarks(
 
     // 调 LLM(持锁,阻塞可控;个人工具可接受)
     use endpoint_core::llm::LlmError;
+    debug!(candidates = candidates.len(), "提交给 LLM 仲裁");
     let verdicts = {
         let guard = state
             .llm_client
@@ -756,9 +825,13 @@ pub async fn adjudicate_watermarks(
         match guard.arbitrate_watermark(&candidates) {
             Ok(v) => v,
             Err(LlmError::NotConfigured) => {
+                warn!("adjudicate_watermarks: LLM 未配置");
                 return Err("LLM 未配置,请在阶段 4 的 LLM 设置中填写 API key".to_string());
             }
-            Err(e) => return Err(format!("LLM 调用失败: {e}")),
+            Err(e) => {
+                warn!(error = %e, "adjudicate_watermarks LLM 调用失败");
+                return Err(format!("LLM 调用失败: {e}"));
+            }
         }
     };
 
@@ -810,6 +883,11 @@ pub async fn adjudicate_watermarks(
         }
     }
 
+    info!(
+        upgraded = updated_watermarks_json.len(),
+        new_cleaning = new_cleaning_json.len(),
+        "adjudicate_watermarks 完成"
+    );
     Ok(serde_json::json!({
         "updated_watermarks": updated_watermarks_json,
         "new_cleaning": new_cleaning_json,
@@ -828,6 +906,7 @@ pub async fn induce_watermark_rule(
     state: State<'_, AppState>,
     spans: Vec<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
+    info!(spans = spans.len(), "induce_watermark_rule 开始");
     if spans.is_empty() {
         return Ok(serde_json::Value::Null);
     }
@@ -859,6 +938,7 @@ pub async fn induce_watermark_rule(
     }
 
     use endpoint_core::llm::LlmError;
+    debug!(rejected = rejected_lines.len(), "提交给 LLM 归纳规则");
     let rule_opt = {
         let guard = state
             .llm_client
@@ -868,17 +948,25 @@ pub async fn induce_watermark_rule(
         match guard.induce_rule(&refs) {
             Ok(r) => r,
             Err(LlmError::NotConfigured) => {
+                warn!("induce_watermark_rule: LLM 未配置");
                 return Err(
                     "LLM 未配置,请在阶段 4 的 LLM 设置中填写 API key".to_string(),
                 );
             }
-            Err(e) => return Err(format!("LLM 调用失败: {e}")),
+            Err(e) => {
+                warn!(error = %e, "induce_watermark_rule LLM 调用失败");
+                return Err(format!("LLM 调用失败: {e}"));
+            }
         }
     };
 
     match rule_opt {
-        None => Ok(serde_json::Value::Null),
+        None => {
+            info!("induce_watermark_rule 完成: LLM 未给出规则");
+            Ok(serde_json::Value::Null)
+        }
         Some(rule) => {
+            info!(rule_id = %rule.id, pattern = %rule.pattern, "induce_watermark_rule 完成");
             serde_json::to_value(&rule).map_err(|e| format!("序列化规则失败: {e}"))
         }
     }
@@ -892,6 +980,7 @@ pub async fn induce_watermark_rule(
 pub async fn save_induced_rule(rule: serde_json::Value) -> Result<(), String> {
     let rule: endpoint_core::rules::Rule =
         serde_json::from_value(rule).map_err(|e| format!("规则反序列化失败: {e}"))?;
+    info!(rule_id = %rule.id, "保存归纳规则");
 
     let path = crate::llm_config::user_rules_path()
         .ok_or_else(|| "无法获取配置目录".to_string())?;
