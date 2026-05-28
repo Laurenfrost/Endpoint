@@ -260,6 +260,18 @@ pub struct Metadata {
     #[serde(skip)]
     pub cover: Option<Vec<u8>>,
     pub description: Option<String>,
+    /// 分类/标签,EPUB 的 `dc:subject` × N。供 Kobo/Calibre 按分类分组。
+    #[serde(default)]
+    pub subjects: Vec<String>,
+    /// 系列名(EPUB `belongs-to-collection` + `calibre:series`)。
+    #[serde(default)]
+    pub series: Option<String>,
+    /// 系列内序号(`group-position` + `calibre:series_index`)。
+    #[serde(default)]
+    pub series_index: Option<u32>,
+    /// 版权声明(`dc:rights`)。`None` 时 EPUB 构建会填入默认模板。
+    #[serde(default)]
+    pub rights: Option<String>,
 }
 
 impl Metadata {
@@ -271,6 +283,10 @@ impl Metadata {
             language: "zh-CN".into(),
             cover: None,
             description: None,
+            subjects: Vec::new(),
+            series: None,
+            series_index: None,
+            rights: None,
         }
     }
 }
@@ -510,6 +526,10 @@ mod tests {
                     language: "zh-CN".into(),
                     cover: Some(vec![0xFFu8, 0xD8, 0xFF]),
                     description: None,
+                    subjects: Vec::new(),
+                    series: None,
+                    series_index: None,
+                    rights: None,
                 },
                 entries: vec![
                     BookEntry::Volume(Volume {

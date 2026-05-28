@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod brave_client;
 mod commands;
 mod llm_config;
 mod openai_client;
@@ -34,6 +35,10 @@ fn main() {
             // 阶段四 4.5:LLM 配置
             commands::get_llm_config,
             commands::set_llm_config,
+            commands::set_search_config,
+            // kepubify 持久化配置
+            commands::get_kepubify_config,
+            commands::set_kepubify_config,
             // 阶段四 4.6:LLM 元数据建议
             commands::suggest_metadata,
             // 阶段四 4.7:LLM 水印仲裁

@@ -55,7 +55,14 @@ export const loadAndAnalyze = (
 /// `decisions`(v2.2 新增,可选):用户决策列表,形状 `[{ span:{start,end}, scope, verdict }]`。
 /// `coverPath`(4.0 新增,可选):封面图片绝对路径。
 /// `cssOverride`(4.0 新增,可选):自定义 CSS 字符串,替换内置默认样式。
-export const buildEpub = ({ outputPath, title, author, kepubifyPath, decisions, coverPath, cssOverride, embedFonts, fontPath }) =>
+/// 扩展元数据(全部可选,留空则 EPUB 不写对应项):
+/// - `description`:简介
+/// - `subjects`:分类标签数组
+/// - `series` + `seriesIndex`:系列名 + 序号
+export const buildEpub = ({
+  outputPath, title, author, kepubifyPath, decisions, coverPath, cssOverride, embedFonts, fontPath,
+  description, subjects, series, seriesIndex,
+}) =>
   invoke("build_epub", {
     outputPath,
     title,
@@ -66,6 +73,10 @@ export const buildEpub = ({ outputPath, title, author, kepubifyPath, decisions, 
     cssOverride: cssOverride ?? null,
     embedFonts: embedFonts ?? false,
     fontPath: fontPath ?? null,
+    description: description ?? null,
+    subjects: subjects ?? null,
+    series: series ?? null,
+    seriesIndex: seriesIndex ?? null,
   });
 
 export const cancelTask = (taskId) => invoke("cancel_task", { taskId });
@@ -80,15 +91,27 @@ export const loadTheme = (name) => invoke("load_theme", { name });
 export const generateTextCover = (title, author, style, fontPath) =>
   invoke("generate_text_cover", { title, author, style, fontPath: fontPath ?? null });
 
-/// 4.5:读取 LLM 配置。返回 `{ base_url, model, key_set, key_masked }`。
+/// 4.5:读取 LLM + 搜索配置。返回包含 LLM 与搜索两组字段的对象,见后端 get_llm_config doc。
 export const getLlmConfig = () => invoke("get_llm_config");
 
-/// 4.5:保存 LLM 配置并重建客户端。api_key 传空字符串清除 key。
+/// 4.5:保存 LLM 配置并重建客户端。api_key 留空 = 保留磁盘旧值。
 export const setLlmConfig = (baseUrl, model, apiKey) =>
   invoke("set_llm_config", { baseUrl, model, apiKey });
 
-/// 4.6:从缓存 source_text 前约 1 万字推断元数据。
-/// 返回 `{ title?, author?, description?, cover_keywords? }` 或 `null`(未配置 LLM / 无法推断)。
+/// 4.5:保存搜索后端配置。provider 留空 = 禁用搜索;apiKey 留空 = 保留旧值。
+export const setSearchConfig = (provider, apiKey) =>
+  invoke("set_search_config", { provider, apiKey });
+
+/// 读取持久化的 kepubify 配置。返回 `{ path, enabled }`。
+export const getKepubifyConfig = () => invoke("get_kepubify_config");
+
+/// 保存 kepubify 配置。path 留空 = 清除(同时 enabled 强制 false)。
+export const setKepubifyConfig = (path, enabled) =>
+  invoke("set_kepubify_config", { path, enabled });
+
+/// 4.6:从缓存的正文前 1000 字 + 文件名推断元数据(可触发 Pass B 搜索补全)。
+/// 返回 `{ title?, author?, description?, cover_keywords?, subjects?, series?, series_index? }`
+/// 或 `null`(未配置 LLM / 无法推断)。
 export const suggestMetadata = () => invoke("suggest_metadata");
 
 /// 4.7:向 LLM 提交 suspect 候选行,裁定为水印则升级到 auto。

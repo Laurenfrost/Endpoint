@@ -26,17 +26,22 @@ pub struct AppState {
     counter: AtomicU64,
     /// 当前生效的 LLM 客户端。初始化时从 `config.toml` 加载;`set_llm_config` 命令可替换。
     /// `NoopLlmClient` 表示未配置。
-    pub llm_client: Mutex<Box<dyn endpoint_core::llm::LlmClient>>,
+    ///
+    /// 用 `Arc` 而非 `Box`:LLM 命令必须在 `spawn_blocking` 内执行(reqwest::blocking
+    /// 在 tokio async 上下文中析构会 panic),需要把客户端引用 move 到 blocking 线程。
+    /// 调用模式:lock → clone Arc → drop guard → spawn_blocking { client.xxx() }。
+    pub llm_client: Mutex<Arc<dyn endpoint_core::llm::LlmClient>>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         let cfg = crate::llm_config::load();
+        let search_cfg = crate::llm_config::load_search();
         Self {
             pipeline: Mutex::new(None),
             cancel_flags: Mutex::new(HashMap::new()),
             counter: AtomicU64::new(0),
-            llm_client: Mutex::new(crate::llm_config::create_client(&cfg)),
+            llm_client: Mutex::new(crate::llm_config::create_client(&cfg, &search_cfg)),
         }
     }
 }

@@ -294,6 +294,7 @@ pub async fn load_and_analyze(
 /// 若提供,会在构建 EPUB 前调用 [`watermark::apply_user_decisions`] 重组 cleaning
 /// + 重 materialize paragraphs,从而让"用户拒绝的清洗"留在 EPUB、"用户接受的 suspect"
 /// 从 EPUB 删掉。决策仅本次调用有效,不持久化。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn build_epub(
     app: AppHandle,
@@ -307,6 +308,11 @@ pub async fn build_epub(
     css_override: Option<String>,
     embed_fonts: Option<bool>,
     font_path: Option<String>,
+    // 阶段四扩展元数据(全部可选,未填则 EPUB 不写对应项)
+    description: Option<String>,
+    subjects: Option<Vec<String>>,
+    series: Option<String>,
+    series_index: Option<u32>,
 ) -> Result<String, String> {
     // 反序列化决策列表(失败显式报错,不静默)
     let decisions_typed: Vec<endpoint_core::domain::UserDecision> = match decisions {
@@ -333,6 +339,24 @@ pub async fn build_epub(
         let mut out = cached.output.clone();
         out.book.metadata.title = title;
         out.book.metadata.author = author;
+        // 扩展元数据:仅在前端传了非空值时写入,空字符串 / 空数组视为「未填」。
+        if let Some(d) = description.as_ref().filter(|s| !s.trim().is_empty()) {
+            out.book.metadata.description = Some(d.trim().to_string());
+        }
+        if let Some(subs) = subjects {
+            let cleaned: Vec<String> = subs
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !cleaned.is_empty() {
+                out.book.metadata.subjects = cleaned;
+            }
+        }
+        if let Some(s) = series.as_ref().filter(|s| !s.trim().is_empty()) {
+            out.book.metadata.series = Some(s.trim().to_string());
+            out.book.metadata.series_index = series_index;
+        }
         out
     };
 
@@ -590,24 +614,27 @@ pub async fn generate_text_cover(
 
 // ============== 阶段四 4.5:LLM 配置 ==============
 
-/// 读取当前 LLM 配置。返回 `{ base_url, model, key_set, key_masked }`。
-/// `key_set`:API key 是否已填写(bool)。`key_masked`:脱敏显示(如 `"sk-...abc"`),
-/// 供前端"已保存"状态展示使用。
+/// 读取当前 LLM + 搜索配置。
+///
+/// 字段:
+/// - `base_url` / `model`:LLM 配置
+/// - `key_set` / `key_masked`:LLM API key 状态 / 脱敏显示
+/// - `configured`:**LLM 能否真正使用**(`base_url` 与 `api_key` 都非空)
+/// - `search_provider`:搜索后端标识(目前仅 `"brave"`)
+/// - `search_key_set` / `search_key_masked`:搜索 API key 状态
+/// - `search_configured`:**搜索能否真正使用**(provider 与 key 都非空)
+///
+/// 前端的门控决策应使用 `configured` / `search_configured`,不要用 key_set。
 #[tauri::command]
 pub async fn get_llm_config(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let cfg = crate::llm_config::load();
+    let search_cfg = crate::llm_config::load_search();
     let key_set = !cfg.api_key.is_empty();
-    let key_masked = if key_set {
-        let k = &cfg.api_key;
-        if k.len() > 8 {
-            format!("{}...{}", &k[..4], &k[k.len() - 4..])
-        } else {
-            "***".to_string()
-        }
-    } else {
-        String::new()
-    };
-    // 验证 llm_client 锁存活(不消费锁内容)
+    let configured = key_set && !cfg.base_url.is_empty();
+    let key_masked = mask(&cfg.api_key);
+    let search_key_set = !search_cfg.api_key.is_empty();
+    let search_configured = search_key_set && !search_cfg.provider.is_empty();
+    let search_key_masked = mask(&search_cfg.api_key);
     let _guard = state
         .llm_client
         .lock()
@@ -618,11 +645,29 @@ pub async fn get_llm_config(state: State<'_, AppState>) -> Result<serde_json::Va
         "model": cfg.model,
         "key_set": key_set,
         "key_masked": key_masked,
+        "configured": configured,
+        "search_provider": search_cfg.provider,
+        "search_key_set": search_key_set,
+        "search_key_masked": search_key_masked,
+        "search_configured": search_configured,
     }))
 }
 
+fn mask(k: &str) -> String {
+    if k.is_empty() {
+        return String::new();
+    }
+    if k.len() > 8 {
+        format!("{}...{}", &k[..4], &k[k.len() - 4..])
+    } else {
+        "***".to_string()
+    }
+}
+
 /// 保存 LLM 配置到 `config.toml`,并立即以新配置重建客户端。
-/// `api_key` 传空字符串表示清除 key(退化到 `NoopLlmClient`)。
+///
+/// - `api_key` 传**空字符串**表示「保留磁盘上已有 key」,与 UI placeholder 承诺一致。
+/// - 要真正清除 key,前端可显式发送一个非空字符串(目前 UI 没有这个入口,等需要再加)。
 #[tauri::command]
 pub async fn set_llm_config(
     state: State<'_, AppState>,
@@ -630,24 +675,114 @@ pub async fn set_llm_config(
     model: String,
     api_key: String,
 ) -> Result<(), String> {
+    let trimmed_key = api_key.trim();
+    let key_from_user_input = !trimmed_key.is_empty();
+    let effective_key = if key_from_user_input {
+        trimmed_key.to_string()
+    } else {
+        crate::llm_config::load().api_key
+    };
     let cfg = crate::llm_config::LlmConfig {
         base_url: base_url.trim().to_string(),
         model: model.trim().to_string(),
-        api_key: api_key.trim().to_string(),
+        api_key: effective_key,
     };
     info!(
         base_url = %cfg.base_url,
         model = %cfg.model,
         key_set = !cfg.api_key.is_empty(),
+        key_from_user_input,
         "保存 LLM 配置"
     );
     crate::llm_config::save(&cfg)?;
-    let new_client = crate::llm_config::create_client(&cfg);
+    // 重建客户端时把当前搜索配置一起注入(允许「只改 LLM 不动搜索」的场景)。
+    // 必须 spawn_blocking:reqwest::blocking::Client::builder().build() 内部短暂
+    // 起一个 tokio 运行时,在外层 async 上下文里析构会 panic。同 suggest_metadata 的坑。
+    let new_client = async_runtime::spawn_blocking(move || {
+        let search_cfg = crate::llm_config::load_search();
+        crate::llm_config::create_client(&cfg, &search_cfg)
+    })
+    .await
+    .map_err(|e| format!("构造 LLM 客户端任务失败: {e}"))?;
     *state
         .llm_client
         .lock()
         .map_err(|e| format!("llm_client 锁中毒: {e}"))? = new_client;
     Ok(())
+}
+
+/// 保存搜索后端配置并热替换 LLM 客户端中的搜索依赖。
+///
+/// `provider` 传空字符串 = 禁用搜索(LLM 仍可用,只是 Pass B 永不触发)。
+/// `api_key` 传空字符串遵循同 set_llm_config 的「保留旧值」语义。
+#[tauri::command]
+pub async fn set_search_config(
+    state: State<'_, AppState>,
+    provider: String,
+    api_key: String,
+) -> Result<(), String> {
+    let trimmed_key = api_key.trim();
+    let key_from_user_input = !trimmed_key.is_empty();
+    let effective_key = if key_from_user_input {
+        trimmed_key.to_string()
+    } else {
+        crate::llm_config::load_search().api_key
+    };
+    let cfg = crate::llm_config::SearchConfig {
+        provider: provider.trim().to_string(),
+        api_key: effective_key,
+    };
+    info!(
+        provider = %cfg.provider,
+        key_set = !cfg.api_key.is_empty(),
+        key_from_user_input,
+        "保存搜索配置"
+    );
+    crate::llm_config::save_search(&cfg)?;
+    // 用新搜索配置重建 LLM 客户端(LLM 客户端持有搜索依赖)。
+    // 同 set_llm_config:必须 spawn_blocking 避免 reqwest::blocking::Client::builder().build()
+    // 在 async 上下文中析构 tokio runtime 而 panic。
+    let new_client = async_runtime::spawn_blocking(move || {
+        let llm_cfg = crate::llm_config::load();
+        crate::llm_config::create_client(&llm_cfg, &cfg)
+    })
+    .await
+    .map_err(|e| format!("构造 LLM 客户端任务失败: {e}"))?;
+    *state
+        .llm_client
+        .lock()
+        .map_err(|e| format!("llm_client 锁中毒: {e}"))? = new_client;
+    Ok(())
+}
+
+// ============== kepubify 持久化配置 ==============
+
+/// 读取持久化的 kepubify 配置。返回 `{ path, enabled }`。
+/// `path` 为空表示尚未选择可执行文件。
+#[tauri::command]
+pub async fn get_kepubify_config() -> Result<serde_json::Value, String> {
+    let cfg = crate::llm_config::load_kepubify();
+    Ok(serde_json::json!({
+        "path": cfg.path,
+        "enabled": cfg.enabled,
+    }))
+}
+
+/// 保存 kepubify 配置。`path` 传空字符串表示清除路径(同时 enabled 自动 false)。
+#[tauri::command]
+pub async fn set_kepubify_config(path: String, enabled: bool) -> Result<(), String> {
+    let trimmed = path.trim().to_string();
+    let cfg = crate::llm_config::KepubifyConfig {
+        // 路径为空时强制 enabled=false,避免 disk 出现 path="" + enabled=true 的歧义状态
+        enabled: !trimmed.is_empty() && enabled,
+        path: trimmed,
+    };
+    info!(
+        path_set = !cfg.path.is_empty(),
+        enabled = cfg.enabled,
+        "保存 kepubify 配置"
+    );
+    crate::llm_config::save_kepubify(&cfg)
 }
 
 // ============== 阶段四 4.6:LLM 元数据建议 ==============
@@ -659,8 +794,8 @@ pub async fn set_llm_config(
 #[tauri::command]
 pub async fn suggest_metadata(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     info!("suggest_metadata 开始");
-    // 从缓存取 source_text
-    let sample_text = {
+    // 从缓存取前 1000 字源文本 + 源文件主名(去扩展名)。
+    let (sample_text, file_name) = {
         let guard = state
             .pipeline
             .lock()
@@ -668,25 +803,37 @@ pub async fn suggest_metadata(state: State<'_, AppState>) -> Result<serde_json::
         let cached = guard
             .as_ref()
             .ok_or_else(|| "尚未加载文件,请先调用 load_and_analyze".to_string())?;
-        // 取前约 1 万个 Unicode 字符
         let chars: String = cached
             .output
             .source_text
             .chars()
-            .take(10_000)
+            .take(1_000)
             .collect();
-        chars
+        let name = Path::new(&cached.source_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string());
+        (chars, name)
     };
 
-    // 取当前 LLM 客户端(clone Box 需要引用;在 spawn_blocking 里用)
-    // 用 Arc<Mutex<...>> 持有后传入 blocking 线程
-    let client_guard = state
+    debug!(
+        sample_chars = sample_text.chars().count(),
+        file_name = file_name.as_deref().unwrap_or("<none>"),
+        "suggest_metadata: 准备调 LLM"
+    );
+
+    // 关键:reqwest::blocking 不能在 tokio async 上下文里直接调,必须 spawn_blocking。
+    let client = state
         .llm_client
         .lock()
-        .map_err(|e| format!("llm_client 锁中毒: {e}"))?;
+        .map_err(|e| format!("llm_client 锁中毒: {e}"))?
+        .clone();
 
-    let suggestion_result = client_guard.suggest_metadata(&sample_text);
-    drop(client_guard);
+    let suggestion_result = async_runtime::spawn_blocking(move || {
+        client.suggest_metadata(&sample_text, file_name.as_deref())
+    })
+    .await
+    .map_err(|e| format!("LLM 任务执行失败: {e}"))?;
 
     use endpoint_core::llm::LlmError;
     match suggestion_result {
@@ -709,7 +856,10 @@ pub async fn suggest_metadata(state: State<'_, AppState>) -> Result<serde_json::
             }))
         }
         Err(LlmError::NotConfigured) => {
-            debug!("LLM 未配置,suggest_metadata 静默返回 null");
+            warn!(
+                "suggest_metadata: AppState 持有的是 NoopLlmClient(未配置)。\
+                 如已通过 UI 保存配置,请确认确实点了「保存」按钮;直接编辑 config.toml 后需重启应用"
+            );
             Ok(serde_json::Value::Null)
         }
         Err(e) => {
@@ -814,24 +964,29 @@ pub async fn adjudicate_watermarks(
         return Ok(serde_json::json!({ "updated_watermarks": [], "new_cleaning": [] }));
     }
 
-    // 调 LLM(持锁,阻塞可控;个人工具可接受)
+    // 调 LLM:必须 spawn_blocking 避免 reqwest::blocking 在 async 上下文中析构 panic。
     use endpoint_core::llm::LlmError;
     debug!(candidates = candidates.len(), "提交给 LLM 仲裁");
-    let verdicts = {
-        let guard = state
-            .llm_client
-            .lock()
-            .map_err(|e| format!("llm_client 锁中毒: {e}"))?;
-        match guard.arbitrate_watermark(&candidates) {
-            Ok(v) => v,
-            Err(LlmError::NotConfigured) => {
-                warn!("adjudicate_watermarks: LLM 未配置");
-                return Err("LLM 未配置,请在阶段 4 的 LLM 设置中填写 API key".to_string());
-            }
-            Err(e) => {
-                warn!(error = %e, "adjudicate_watermarks LLM 调用失败");
-                return Err(format!("LLM 调用失败: {e}"));
-            }
+    let client = state
+        .llm_client
+        .lock()
+        .map_err(|e| format!("llm_client 锁中毒: {e}"))?
+        .clone();
+    let candidates_for_blocking = candidates.clone();
+    let llm_result = async_runtime::spawn_blocking(move || {
+        client.arbitrate_watermark(&candidates_for_blocking)
+    })
+    .await
+    .map_err(|e| format!("LLM 任务执行失败: {e}"))?;
+    let verdicts = match llm_result {
+        Ok(v) => v,
+        Err(LlmError::NotConfigured) => {
+            warn!("adjudicate_watermarks: LLM 未配置");
+            return Err("LLM 未配置,请在阶段 4 的 LLM 设置中填写 API key".to_string());
+        }
+        Err(e) => {
+            warn!(error = %e, "adjudicate_watermarks LLM 调用失败");
+            return Err(format!("LLM 调用失败: {e}"));
         }
     };
 
@@ -939,24 +1094,26 @@ pub async fn induce_watermark_rule(
 
     use endpoint_core::llm::LlmError;
     debug!(rejected = rejected_lines.len(), "提交给 LLM 归纳规则");
-    let rule_opt = {
-        let guard = state
-            .llm_client
-            .lock()
-            .map_err(|e| format!("llm_client 锁中毒: {e}"))?;
+    let client = state
+        .llm_client
+        .lock()
+        .map_err(|e| format!("llm_client 锁中毒: {e}"))?
+        .clone();
+    let llm_result = async_runtime::spawn_blocking(move || {
         let refs: Vec<&str> = rejected_lines.iter().map(|s| s.as_str()).collect();
-        match guard.induce_rule(&refs) {
-            Ok(r) => r,
-            Err(LlmError::NotConfigured) => {
-                warn!("induce_watermark_rule: LLM 未配置");
-                return Err(
-                    "LLM 未配置,请在阶段 4 的 LLM 设置中填写 API key".to_string(),
-                );
-            }
-            Err(e) => {
-                warn!(error = %e, "induce_watermark_rule LLM 调用失败");
-                return Err(format!("LLM 调用失败: {e}"));
-            }
+        client.induce_rule(&refs)
+    })
+    .await
+    .map_err(|e| format!("LLM 任务执行失败: {e}"))?;
+    let rule_opt = match llm_result {
+        Ok(r) => r,
+        Err(LlmError::NotConfigured) => {
+            warn!("induce_watermark_rule: LLM 未配置");
+            return Err("LLM 未配置,请在阶段 4 的 LLM 设置中填写 API key".to_string());
+        }
+        Err(e) => {
+            warn!(error = %e, "induce_watermark_rule LLM 调用失败");
+            return Err(format!("LLM 调用失败: {e}"));
         }
     };
 

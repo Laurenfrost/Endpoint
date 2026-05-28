@@ -30,6 +30,7 @@ pub mod epub;
 pub mod kepubify;
 pub mod llm;
 pub mod rules;
+pub mod search;
 pub mod watermark;
 
 use std::path::{Path, PathBuf};

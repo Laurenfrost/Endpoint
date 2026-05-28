@@ -44,8 +44,8 @@ pub enum AdjudicationVerdict {
     Uncertain,
 }
 
-/// LLM 对书名/作者/简介/封面关键词的推断结果。
-#[derive(Debug, Clone)]
+/// LLM 对元数据的推断结果。所有字段都可为空——LLM 应当对未知的字段留空而非编造。
+#[derive(Debug, Clone, Default)]
 pub struct MetadataSuggestion {
     pub title: Option<String>,
     pub author: Option<String>,
@@ -53,6 +53,61 @@ pub struct MetadataSuggestion {
     pub description: Option<String>,
     /// 封面关键词建议(可选,供用户手动搜图参考;不自动搜图)。
     pub cover_keywords: Option<String>,
+    /// 分类/标签(0..=3 个),写入 EPUB 的 `dc:subject`,供 Kobo / Calibre 书库分组。
+    /// 例如:`["玄幻", "无限流"]`。
+    pub subjects: Vec<String>,
+    /// 系列名称(如「斗罗大陆」),写入 EPUB 的 `belongs-to-collection` + `calibre:series`。
+    pub series: Option<String>,
+    /// 系列内序号(从 1 起;EPUB `group-position` + `calibre:series_index`)。
+    /// 仅当 [`series`] 非空时有意义。
+    pub series_index: Option<u32>,
+}
+
+impl MetadataSuggestion {
+    /// 至少有一个字段非空才算「LLM 给出了建议」。供调用方判断是否要触发 Pass B 搜索。
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none()
+            && self.author.is_none()
+            && self.description.is_none()
+            && self.cover_keywords.is_none()
+            && self.subjects.is_empty()
+            && self.series.is_none()
+            && self.series_index.is_none()
+    }
+
+    /// 任何主要字段为空都视为「需要搜索补全」。`cover_keywords` 不算主要字段。
+    pub fn needs_fillin(&self) -> bool {
+        self.title.is_none()
+            || self.author.is_none()
+            || self.description.is_none()
+            || self.subjects.is_empty()
+            || self.series.is_none()
+    }
+
+    /// 把另一个建议中的字段填到本建议的空缺处(只填空,不覆盖)。
+    pub fn fill_from(&mut self, other: MetadataSuggestion) {
+        if self.title.is_none() {
+            self.title = other.title;
+        }
+        if self.author.is_none() {
+            self.author = other.author;
+        }
+        if self.description.is_none() {
+            self.description = other.description;
+        }
+        if self.cover_keywords.is_none() {
+            self.cover_keywords = other.cover_keywords;
+        }
+        if self.subjects.is_empty() {
+            self.subjects = other.subjects;
+        }
+        if self.series.is_none() {
+            self.series = other.series;
+        }
+        if self.series_index.is_none() {
+            self.series_index = other.series_index;
+        }
+    }
 }
 
 /// LLM 客户端接口。核心库依赖此 trait 抽象,桥接层提供具体 HTTP 实现。
@@ -71,8 +126,15 @@ pub trait LlmClient: Send + Sync {
     /// 若无法归纳则返回 `Ok(None)`。
     fn induce_rule(&self, rejected_lines: &[&str]) -> Result<Option<Rule>, LlmError>;
 
-    /// 给定章节开头样本文本,推断书名与作者。
-    fn suggest_metadata(&self, sample_text: &str) -> Result<Option<MetadataSuggestion>, LlmError>;
+    /// 给定章节开头样本文本(以及可选的源文件名作为提示),推断书名与作者。
+    ///
+    /// `file_name` 是不含扩展名的源文件主名(如 `《蛊真人》精校版`),网文 txt 的文件名
+    /// 通常已包含书名,作为额外线索喂给 LLM 能显著提高短样本下的命中率。
+    fn suggest_metadata(
+        &self,
+        sample_text: &str,
+        file_name: Option<&str>,
+    ) -> Result<Option<MetadataSuggestion>, LlmError>;
 }
 
 /// 空实现:所有方法返回 `NotConfigured`。
@@ -91,7 +153,11 @@ impl LlmClient for NoopLlmClient {
         Err(LlmError::NotConfigured)
     }
 
-    fn suggest_metadata(&self, _sample_text: &str) -> Result<Option<MetadataSuggestion>, LlmError> {
+    fn suggest_metadata(
+        &self,
+        _sample_text: &str,
+        _file_name: Option<&str>,
+    ) -> Result<Option<MetadataSuggestion>, LlmError> {
         Err(LlmError::NotConfigured)
     }
 }

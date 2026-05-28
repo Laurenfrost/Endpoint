@@ -594,6 +594,58 @@ fn content_opf(
     let author = xml_escape(&book.metadata.author);
     let language = xml_escape(&book.metadata.language);
 
+    // 可选元数据:逐项判定后拼到 metadata 段。
+    let mut extra_metadata = String::new();
+    if let Some(desc) = book.metadata.description.as_ref().filter(|s| !s.is_empty()) {
+        extra_metadata.push_str(&format!(
+            "    <dc:description>{}</dc:description>\n",
+            xml_escape(desc)
+        ));
+    }
+    for subject in book.metadata.subjects.iter().filter(|s| !s.is_empty()) {
+        extra_metadata.push_str(&format!(
+            "    <dc:subject>{}</dc:subject>\n",
+            xml_escape(subject)
+        ));
+    }
+    if let Some(series) = book.metadata.series.as_ref().filter(|s| !s.is_empty()) {
+        let series_esc = xml_escape(series);
+        // EPUB 3 collection refines:用 collection-type=series 表示「系列」
+        extra_metadata.push_str(&format!(
+            "    <meta property=\"belongs-to-collection\" id=\"series-id\">{series_esc}</meta>\n\
+             \x20   <meta refines=\"#series-id\" property=\"collection-type\">series</meta>\n"
+        ));
+        if let Some(idx) = book.metadata.series_index {
+            extra_metadata.push_str(&format!(
+                "    <meta refines=\"#series-id\" property=\"group-position\">{idx}</meta>\n"
+            ));
+        }
+        // Calibre/旧 Kobo 兼容标签:`opf:` 命名空间下的 meta name= 形式。
+        extra_metadata.push_str(&format!(
+            "    <meta name=\"calibre:series\" content=\"{series_esc}\"/>\n"
+        ));
+        if let Some(idx) = book.metadata.series_index {
+            extra_metadata.push_str(&format!(
+                "    <meta name=\"calibre:series_index\" content=\"{idx}\"/>\n"
+            ));
+        }
+    }
+    // 版权:未指定时填默认模板。个人转制工具不主张版权,只声明归原作者。
+    let rights = book
+        .metadata
+        .rights
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("版权归原作者所有。本电子书由 Endpoint 个人转制工具生成,仅供个人离线阅读使用。");
+    extra_metadata.push_str(&format!(
+        "    <dc:rights>{}</dc:rights>\n",
+        xml_escape(rights)
+    ));
+    // 封面 manifest 项的 cover 标识(EPUB 2 兼容,部分老阅读器只认这个)。
+    if has_cover {
+        extra_metadata.push_str("    <meta name=\"cover\" content=\"cover-image\"/>\n");
+    }
+
     let mut manifest = String::new();
     let mut spine = String::new();
     for s in sections {
@@ -638,7 +690,7 @@ fn content_opf(
     <dc:creator>{author}</dc:creator>
     <dc:language>{language}</dc:language>
     <meta property="dcterms:modified">{modified}</meta>
-  </metadata>
+{extra_metadata}  </metadata>
   <manifest>
     <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
     <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
@@ -653,6 +705,7 @@ fn content_opf(
         author = author,
         language = language,
         modified = modified,
+        extra_metadata = extra_metadata,
         cover_manifest = cover_manifest,
         font_manifest = font_manifest,
         manifest = manifest,
