@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Endpoint — 网文 txt → EPUB",
+        "title": "Endpoint",
         "width": 1280,
         "height": 800,
         "resizable": true

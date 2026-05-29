@@ -259,4 +259,17 @@
     </p>
     {#if kepubifyMsg}<p class="text-[11px] text-destructive">{kepubifyMsg}</p>{/if}
   </section>
+
+  <!-- 作者信息 -->
+  <footer class="mt-2 border-t pt-3 text-[11px] text-muted-foreground/60">
+    <p>作者: Laurenfrost</p>
+    <p>邮箱: <u>me@lvy.ink</u></p>
+    <p class="mt-0.5">
+      项目地址:
+      <a class="hover:text-muted-foreground hover:underline" href="https://github.com/Laurenfrost/Endpoint" target="_blank" rel="noopener">
+        https://github.com/Laurenfrost/Endpoint
+      </a>
+    </p>
+    <p>AI 声明: 本项目在开发过程中使用了 AI 工具</p>
+  </footer>
 </div>
