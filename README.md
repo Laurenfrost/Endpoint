@@ -9,9 +9,10 @@
 - **水印检测**：基于行频统计 + 非中文占比 + 关键词正则的本地三特征融合，自动 / 灰区双阈值分流
 - **章节识别**：正则规则库（第X章 / 第X回 / 第X卷 等），支持卷章两级 TOC
 - **超长章节拆分**：中位数算法自动识别遗漏标题
-- **导出精修**：自定义 CSS 主题（标准 / 古风 / 高对比度）、封面图片嵌入、文字封面自动生成、字体嵌入（霞鹜文楷 opt-in）
+- **导出精修**：自定义 CSS 主题（EasyPub / 标准 / 古风 / 高对比度）、封面图片嵌入、文字封面自动生成、字体嵌入（霞鹜文楷 opt-in）
 - **LLM 增强（可选）**：水印灰区仲裁、元数据建议、规则归纳持久化；未配置 LLM 时所有功能正常工作
 - **kepubify 优化**：调用外部 kepubify 生成 Kobo 优化格式
+- **明暗模式**：UI 支持浅色 / 深色 / 跟随系统三态切换（活动栏底部按钮，自动持久化）
 
 ## 环境要求
 
@@ -44,14 +45,14 @@ cargo tauri build
 
 ## LLM 配置（可选）
 
-在阶段 4 展开「LLM 设置」，填写兼容 OpenAI 接口的 base_url / model / API key（如 DeepSeek）。配置后可在阶段 2 使用「询问 LLM」仲裁水印灰区，以及在阶段 4 使用「从正文建议」自动填写元数据。
+点击活动栏底部的 ⚙ 图标进入设置面板，填写兼容 OpenAI 接口的 base_url / model / API key（如 DeepSeek）。配置后可在阶段 2 使用「询问 LLM」仲裁水印灰区，以及在阶段 4 使用「从正文建议」自动填写元数据。同一面板下还能配置可选的 Brave 搜索后端和 kepubify.exe 路径。
 
 ## 项目结构
 
 ```
 crates/core/          纯 Rust 核心库（不依赖 Tauri）
 src-tauri/            Tauri 桥接层（命令、状态、LLM 客户端）
-ui/                   Svelte 5 + Vite 前端
+ui/                   Svelte 5 + Vite + Tailwind v4 + shadcn-svelte 风格组件
 scripts/              辅助脚本（fetch-fonts.ps1）
 docs/                 架构文档与变更日志
 ```

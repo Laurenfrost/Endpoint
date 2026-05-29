@@ -5,36 +5,44 @@
 三层架构：**核心库**（纯 Rust）+ **桥接层**（Tauri 命令）+ **前端**（Svelte 5）。
 
 ```
-ui/                         前端（Svelte 5 + Vite）
+ui/                                     前端（Svelte 5 + Vite + Tailwind v4 + shadcn-svelte 风格）
+  vite.config.js                        @tailwindcss/vite 插件 + $lib 别名
+  jsconfig.json                         路径别名（$lib → src/lib）
   src/
-    App.svelte              三栏骨架：标题栏 + ActivityBar + Sidebar + TextView
-    ipc.js                  Tauri IPC 薄封装
-    stores/                 响应式状态（pipeline / stage / progress / annotations / decisions / llm）
-    text/                   ByteIndex.js / VirtualText.svelte / OverviewRuler.svelte
-    layout/                 ActivityBar.svelte / Sidebar.svelte
-    stages/                 Stage1Input / Stage2Cleaning / Stage3Chapter / Stage4Export
+    App.svelte                          三栏骨架 + <ModeWatcher /> 挂载
+    app.css                             Tailwind v4 入口 + 主题 CSS 变量（light/dark）
+    main.js                             Vite 入口（import app.css 后 mount App）
+    ipc.js                              Tauri IPC 薄封装
+    stores/                             响应式状态（pipeline / stage / progress / annotations / decisions / llm）
+    text/                               ByteIndex.js / VirtualText / OverviewRuler / TextView
+    layout/                             ActivityBar / Sidebar / StatusBar
+    stages/                             Stage1Input / Stage2Cleaning / Stage3Chapter / Stage4Export / Settings
+    lib/
+      utils.js                          cn() = clsx + tailwind-merge
+      components/mode-toggle.svelte     三态明暗切换按钮
+      components/ui/                    shadcn-svelte 风格组件（手写，bits-ui 驱动）
 
-src-tauri/                  桥接层（Tauri 应用壳）
+src-tauri/                              桥接层（Tauri 应用壳）
   src/
-    commands.rs             全部 Tauri 命令（薄胶水，无业务逻辑）
-    state.rs                AppState（pipeline 缓存 + task 计数 + LLM 客户端）
-    llm_config.rs           config.toml 读写 + user_rules_path
-    openai_client.rs        OpenAI 兼容 HTTP 客户端（实现 LlmClient trait）
-    main.rs                 命令注册
+    commands.rs                         全部 Tauri 命令（薄胶水，无业务逻辑）
+    state.rs                            AppState（pipeline 缓存 + task 计数 + LLM 客户端）
+    llm_config.rs                       config.toml 读写 + user_rules_path
+    openai_client.rs                    OpenAI 兼容 HTTP 客户端（实现 LlmClient trait）
+    main.rs                             命令注册
 
-crates/core/                核心库（不依赖 Tauri）
+crates/core/                            核心库（不依赖 Tauri）
   src/
-    domain.rs               领域模型（冻结契约）
-    encoding.rs             编码探测与解码
-    cleaning.rs             格式清洗（产出标注，不修改原文）
-    chapter.rs              章节解析 + 超长章节检测
-    watermark.rs            水印检测（三特征 + 双阈值）
-    rules.rs                规则库（JSON I/O + builtin 规则）
-    epub.rs                 EPUB 构建
-    kepubify.rs             kepubify 进程调用
-    cover_gen.rs            文字封面 PNG 生成
-    llm.rs                  LlmClient trait + NoopLlmClient
-    lib.rs                  run_pipeline / build_epub_from / ConvertOptions / ProgressSink
+    domain.rs                           领域模型（冻结契约）
+    encoding.rs                         编码探测与解码
+    cleaning.rs                         格式清洗（产出标注，不修改原文）
+    chapter.rs                          章节解析 + 超长章节检测
+    watermark.rs                        水印检测（三特征 + 双阈值）
+    rules.rs                            规则库（JSON I/O + builtin 规则）
+    epub.rs                             EPUB 构建
+    kepubify.rs                         kepubify 进程调用
+    cover_gen.rs                        文字封面 PNG 生成
+    llm.rs                              LlmClient trait + NoopLlmClient
+    lib.rs                              run_pipeline / build_epub_from / ConvertOptions / ProgressSink
 ```
 
 ---
@@ -169,20 +177,41 @@ pub struct UserDecision { pub span: Span, pub scope: DecisionScope, pub verdict:
 
 ## 前端
 
-**框架**：Svelte 5（runes API：`$state` / `$derived` / `$effect`）+ Vite 6
+**框架**：Svelte 5（runes API：`$state` / `$derived` / `$effect`）+ Vite 6 + Tailwind CSS v4
+
+**UI 层依赖**：
+- `bits-ui` v2：无样式 headless primitives（Select / Switch / Slider / Tabs / Tooltip / Dialog / Label / Checkbox / Progress / Separator）
+- `tailwind-variants`：组件变体（buttonVariants / badgeVariants / alertVariants）
+- `clsx` + `tailwind-merge`：`cn()` 助手合并类名，解决冲突
+- `@lucide/svelte`：图标库（按需引入，不是全量 bundle）
+- `mode-watcher` v1：明暗模式状态机 + localStorage 持久化 + `<ModeWatcher />` 自动在 `<html>` 上加/去 `.dark` 类
+
+**主题系统**（`ui/src/app.css`）：
+- `@import "tailwindcss"`；自定义 `@custom-variant dark (&:where(.dark, .dark *))`
+- `:root { --background ... }` / `.dark { --background ... }` 两套 OKLCH 色板
+- 业务语义色变量：`--sidebar` / `--activitybar` / `--statusbar` / `--hl-cleaning` / `--hl-heading` / `--hl-volume`
+- `@theme inline { --color-background: var(--background); ... }` 把变量暴露给 Tailwind，生成 `bg-background` / `text-foreground` / `bg-sidebar` 等工具类
+
+**明暗模式三态**（`ui/src/lib/components/mode-toggle.svelte`）：
+- 状态：`userPrefersMode.current` ∈ `"system" | "light" | "dark"`；`mode.current` 是系统解析后的实际值
+- 切换循环：light → dark → system → light
+- 图标：system 显示 Monitor，否则按 `mode.current` 显示 Sun/Moon
+- 入口：ActivityBar 底部（设置图标上方）
 
 **三栏布局**（App.svelte）：
 ```
 [ActivityBar 56px] [Sidebar 320px] [TextView 余下宽度]
+                                              ↑ 右缘附 OverviewRuler 14px
+[StatusBar 24px]                                          ← 全宽底栏
 ```
-切换阶段只换 Sidebar 内容和标注层，骨架不动。
+切换阶段只换 Sidebar 内容和标注层，骨架不动。骨架颜色通过 CSS 变量随 dark 模式切换。
 
 **关键 Store**：
 
 | Store | 内容 |
 |-------|------|
 | `pipeline.svelte.js` | `{ dto, sourcePath, byteIndex }` —— 整个 PipelineOutput DTO + ByteIndex 实例 |
-| `stage.svelte.js` | 当前阶段 1–4 |
+| `stage.svelte.js` | 当前阶段 1–4 / settings；`STAGE_DEFS` 含 lucide icon 组件引用 |
 | `progress.svelte.js` | `{ stage, percent, detail, busy }` |
 | `annotations.svelte.js` | `layers[]`（各阶段注入）+ `jumpTo` 信号 |
 | `decisions.svelte.js` | `{ map: {[key]: "approved"|"rejected"} }` —— 水印/清洗决策 |
@@ -193,11 +222,21 @@ pub struct UserDecision { pub span: Span, pub scope: DecisionScope, pub verdict:
 - 行高估算：`ceil(line_chars / wrapCol) × ROW_HEIGHT`（非精确，CJK 短行场景够用）
 - `cumHeights`（Uint32Array）+ 二分定位可视区，O(log L)
 - 多层标注：按 span 区间叠加，相同位置取先出现层的 className
+- 高亮配色用 RGBA 字面量（不是 CSS 变量），dark 模式下加深透明度让高亮在暗底上仍可见
+
+**OverviewRuler**：
+- Canvas 渲染，`ctx.fillStyle` 不接受 `var(--xxx)`，所以传入 `var(--hl-cleaning)` 等 token 时会用 `getComputedStyle(document.documentElement).getPropertyValue(name)` 解析成实际色值
+- `$effect` 监听 `mode.current`，模式切换时重绘
 
 **ByteIndex.js**：
 - 维护 char ↔ byte 双向索引表
 - 处理 ASCII（1B）/ BMP CJK（3B）/ 代理对（4B，emoji 等）
 - 6 个 assert 测试覆盖边界情况
+
+**shadcn-svelte 风格组件**（`ui/src/lib/components/ui/`）：
+- 手写在仓库内，未接 `npx shadcn-svelte add` CLI——版本升级需手动比对官方仓库
+- 文件结构遵循官方约定：每组件一个目录 + `<name>.svelte` + `index.js`（命名导出）
+- 调用方式：`import { Button } from "$lib/components/ui/button/index.js"` 或 `import * as Tabs from "$lib/components/ui/tabs/index.js"`
 
 ---
 
@@ -208,5 +247,6 @@ pub struct UserDecision { pub span: Span, pub scope: DecisionScope, pub verdict:
 | `%APPDATA%\Endpoint\config.toml` | LLM 配置（base_url / model / api_key） |
 | `%APPDATA%\Endpoint\rules.json` | 用户/LLM 归纳的水印规则（跨会话持久化） |
 | `src-tauri/resources/fonts/*.ttf` | 嵌入字体（不进 git，用 fetch-fonts.ps1 下载） |
-| `src-tauri/resources/themes/*.css` | CSS 主题预设（standard / classic / highcontrast） |
+| `src-tauri/resources/themes/*.css` | EPUB 内 CSS 主题预设（easypub / standard / classic / highcontrast） |
 | `%TEMP%\endpoint_text_cover.png` | 文字封面临时文件 |
+| `localStorage["mode-watcher-mode"]` | UI 明暗模式选择（"light" / "dark" / "system"，mode-watcher 自动管理） |

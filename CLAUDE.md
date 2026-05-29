@@ -15,7 +15,10 @@
 - **框架**：Tauri 2（Rust + Svelte 5 + Vite 6）
 - **核心库**：`crates/core`（纯 Rust，零 Tauri 依赖）
 - **桥接层**：`src-tauri/src/`（Tauri 命令，薄胶水）
-- **前端**：`ui/src/`（Svelte 5 runes API）
+- **前端**：`ui/src/`（Svelte 5 runes API + Tailwind CSS v4 + shadcn-svelte 风格组件）
+  - UI 层：`bits-ui` v2 提供无样式 primitives；`tailwind-variants` + `clsx` + `tailwind-merge` 做组件变体
+  - 图标：`@lucide/svelte`
+  - 明暗模式：`mode-watcher`（三态 system/light/dark，自动持久化到 localStorage）
 - **LLM**：OpenAI 兼容接口（reqwest blocking），通过 trait 可替换，完全可选
 
 ---
@@ -52,13 +55,24 @@ src-tauri/src/
   main.rs          命令注册
 
 ui/src/
-  App.svelte             三栏骨架（标题栏 + ActivityBar + Sidebar + TextView）
-  ipc.js                 Tauri IPC 薄封装（所有 invoke 调用在此）
-  stores/                响应式状态（pipeline / stage / progress / annotations / decisions / llm）
-  text/                  ByteIndex.js / VirtualText.svelte / OverviewRuler.svelte
-  layout/                ActivityBar.svelte / Sidebar.svelte
-  stages/                Stage1Input / Stage2Cleaning / Stage3Chapter / Stage4Export
+  App.svelte                         三栏骨架（ActivityBar + Sidebar + TextView + StatusBar）+ <ModeWatcher />
+  app.css                            Tailwind v4 入口 + 主题 CSS 变量（light / dark / 业务语义色）
+  main.js                            Vite 入口，import app.css 后 mount App
+  ipc.js                             Tauri IPC 薄封装（所有 invoke 调用在此）
+  stores/                            响应式状态（pipeline / stage / progress / annotations / decisions / llm）
+  text/                              ByteIndex.js / VirtualText.svelte / OverviewRuler.svelte / TextView.svelte
+  layout/                            ActivityBar / Sidebar / StatusBar
+  stages/                            Stage1Input / Stage2Cleaning / Stage3Chapter / Stage4Export / Settings
+  lib/
+    utils.js                         cn() 助手（clsx + tailwind-merge）
+    components/mode-toggle.svelte    三态明暗切换按钮（mode-watcher）
+    components/ui/                   shadcn-svelte 风格组件（手写，bits-ui 驱动）
+      button / input / textarea / label / card / badge / separator
+      switch / slider / progress / checkbox
+      tabs / select / tooltip / dialog / alert
 ```
+
+**前端别名**：`$lib` → `ui/src/lib`（见 `vite.config.js` + `jsconfig.json`）。
 
 ---
 
@@ -108,16 +122,23 @@ WatermarkSignalKind: Repetition | NonCjkRatio | KeywordRegex | LlmAdjudication
 | `%APPDATA%\Endpoint\config.toml` | LLM 配置（base_url / model / api_key） |
 | `%APPDATA%\Endpoint\rules.json` | 用户/LLM 归纳的水印规则（跨会话持久化） |
 | `src-tauri/resources/fonts/*.ttf` | 嵌入字体（不进 git，用 `scripts/fetch-fonts.ps1` 下载） |
-| `src-tauri/resources/themes/*.css` | CSS 主题预设（standard / classic / highcontrast） |
+| `src-tauri/resources/themes/*.css` | EPUB 内 CSS 主题预设（easypub / standard / classic / highcontrast） |
 | `%TEMP%\endpoint_text_cover.png` | 文字封面临时文件 |
+| `localStorage["mode-watcher-mode"]` | 用户选择的明暗模式（"light" / "dark" / "system"，由 mode-watcher 自动管理） |
+
+> EPUB 内主题（themes/*.css）和 UI 明暗模式是两码事：前者影响生成的 EPUB 阅读体验，后者只影响桌面端 UI 配色。
 
 ---
 
 ## 禁区（不得改动）
 
 - `domain.rs` 中的冻结类型和 `Span` 语义（UTF-8 字节 + 半开区间 + decoded source 参照）
-- `VirtualText.svelte` / `OverviewRuler.svelte` / `ActivityBar.svelte` / 三栏骨架核心交互
 - IPC 锁定测试的期望值
+- 三栏骨架的核心交互（活动栏 + 侧边栏 + 文本区 + 状态栏，阶段切换语义、stage gating、跳转信号）
+- `VirtualText.svelte` 的虚拟滚动算法（cumHeights + 二分 + 多层标注线性合并），仅可调样式与高亮规则
+- `OverviewRuler.svelte` 的字节比例映射（`it.span.start / totalBytes * height`），仅可调底色 / 描边色
+
+> 历史背景：上述前端文件在 shadcn-svelte 改造时被整体重写过样式层，但**核心交互算法保留不变**。修动 hover / dark 配色 / 间距属于自由区，触碰滚动定位、字节-像素映射前必须确认。
 
 ---
 
@@ -129,6 +150,8 @@ WatermarkSignalKind: Repetition | NonCjkRatio | KeywordRegex | LlmAdjudication
 | Cancel 接口 | `TODO(cancel)` 散落核心库，长循环未检查信号 |
 | 字体子集化 | 嵌入完整字体约 16MB，合法但较大 |
 | OpenAI 以外的 provider | 目前只支持 OpenAI 兼容接口 |
+| shadcn-svelte CLI 未接入 | 组件手写在 `ui/src/lib/components/ui/`，没接 `npx shadcn-svelte add`；版本升级要手动改 |
+| UI 组件 TypeScript | 现版 .js + .svelte（无 lang="ts"），与官方 shadcn-svelte 的 .ts 版本有出入 |
 
 ---
 
@@ -138,8 +161,15 @@ WatermarkSignalKind: Repetition | NonCjkRatio | KeywordRegex | LlmAdjudication
 # 下载内置字体
 .\scripts\fetch-fonts.ps1
 
-# 开发模式（热重载）
+# 安装前端依赖（首次或 package.json 变更后）
+cd ui ; npm install
+
+# 开发模式（热重载，含 Vite + Tauri）
 cargo tauri dev
+
+# 仅前端开发服 / 编译检查（不启 Tauri 窗口）
+cd ui ; npm run dev
+cd ui ; npm run build
 
 # 运行核心库测试
 cargo test --workspace

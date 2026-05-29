@@ -190,6 +190,58 @@
 
 ---
 
+## 阶段五：前端 UI 重写 + 明暗模式
+
+**时间**：2026-05-29
+
+**缘起**：原阶段二骨架虽够用，但配色硬编码（VS Code 浅色风），在夜间使用刺眼；组件库零依赖、自己手写 CSS 维护成本递增；用户明确希望整套 UI 切到 shadcn-svelte 风格 + 明暗模式切换。
+
+**关键决策**：
+
+| 编号 | 决策 | 理由 |
+|------|------|------|
+| D14 | 选 Tailwind v4（非 v3） | shadcn-svelte 当前推荐；纯 CSS 配置（@theme）无需 PostCSS / tailwind.config.js |
+| D15 | shadcn-svelte 组件手写在仓库，不接 CLI | CLI 假设 SvelteKit + TypeScript，本项目是裸 Vite + JS；手写副本更可控但版本升级要手动 |
+| D16 | 临时打破 CLAUDE.md 禁区（VirtualText / OverviewRuler / ActivityBar） | 用户明确授权，全量替换比保留旧 CSS 拼接成本更低；核心交互算法保留，仅样式层重写 |
+| D17 | 用 `mode-watcher` 而非自写 store | 维护 localStorage / `matchMedia(prefers-color-scheme)` / `.dark` 类 + 三态切换的细节多，复用社区库省事 |
+| D18 | 业务高亮色（清洗/章/卷）仍用 RGBA 字面量 | 红/蓝/绿是 stage UI 的语义信号，不应跟主题随动；在 `.dark` 下加深透明度而非换色相 |
+| D19 | UI 明暗模式 vs EPUB 内 CSS 主题分离 | 两者目的不同：前者是桌面端配色，后者是阅读器内排版；混在一起会让用户混淆 |
+
+**实际交付**：
+
+新依赖：
+- `tailwindcss@^4` + `@tailwindcss/vite@^4` + `tw-animate-css`
+- `bits-ui@^2` + `tailwind-variants` + `clsx` + `tailwind-merge`
+- `mode-watcher@^1` + `@lucide/svelte`
+
+基础设施：
+- `vite.config.js` 加 `@tailwindcss/vite` 插件 + `$lib` 别名
+- `jsconfig.json` 配 `$lib` 路径解析（IDE 跳转）
+- `ui/src/app.css`：`@import "tailwindcss"` + `@custom-variant dark` + `:root` / `.dark` 两套 OKLCH 色板 + `@theme inline` 暴露给 Tailwind
+- `ui/src/lib/utils.js`：`cn()` 助手
+
+新组件目录（`ui/src/lib/components/ui/`，每个组件含 `.svelte` + `index.js`）：
+- 基础：button / input / textarea / label / card（含 Header/Title/Description/Content/Footer）/ badge / separator
+- 表单控件：switch / slider / progress / checkbox
+- 复合：tabs / select / tooltip / dialog / alert
+
+明暗模式：
+- `ui/src/lib/components/mode-toggle.svelte`：三态按钮（system / light / dark），lucide Monitor/Sun/Moon 图标
+- `App.svelte` 顶部挂 `<ModeWatcher />`，自动维护 `<html>.dark` 类
+- ActivityBar 底部加入 ModeToggle（设置图标上方）
+
+重写文件：
+- `App.svelte` / `layout/ActivityBar.svelte` / `layout/Sidebar.svelte` / `layout/StatusBar.svelte`
+- `stages/Stage1Input.svelte` / `Stage2Cleaning.svelte` / `Stage3Chapter.svelte` / `Stage4Export.svelte` / `Settings.svelte`
+- `stores/stage.svelte.js`：`STAGE_DEFS` 的 icon 字段从 emoji 字符串换成 lucide 组件引用
+- `text/TextView.svelte` / `text/VirtualText.svelte` / `text/OverviewRuler.svelte`：仅样式层（CSS 变量 + `.dark` 覆盖 + canvas 颜色解析 `var()`）
+
+CLAUDE.md 同步更新：禁区改为「**仅核心交互算法**不可改」（虚拟滚动定位 / 字节比例映射 / 阶段切换 gating），样式与 hover / 间距进入自由区。
+
+**真机验证**：vite build / vite dev server 全部通过编译；运行时需用户在 `cargo tauri dev` 中走一遍四阶段 + 三态切换确认。
+
+---
+
 ## 已知技术债
 
 | 项目 | 状态 | 说明 |
@@ -198,3 +250,5 @@
 | Cancel 接口 | 预留未实装 | `TODO(cancel)` 散落核心库，长循环未检查信号 |
 | 字体子集化 | 推迟 | 嵌入完整字体体积约 16MB，合法但较大 |
 | OpenAI 以外的 provider | 未做 | Anthropic 原生 API 等，目前只支持 OpenAI 兼容接口 |
+| shadcn-svelte CLI 未接入 | 接受 | 组件手写在 `ui/src/lib/components/ui/`，版本升级要手动比对官方仓库 |
+| UI 组件 TypeScript | 未做 | 现在是 .js + 无类型 .svelte；要全量加类型需先把整套前端切到 TS |
