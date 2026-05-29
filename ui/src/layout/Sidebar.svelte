@@ -4,10 +4,13 @@
   import Stage2Cleaning from "../stages/Stage2Cleaning.svelte";
   import Stage3Chapter from "../stages/Stage3Chapter.svelte";
   import Stage4Export from "../stages/Stage4Export.svelte";
+  import Settings from "../stages/Settings.svelte";
 </script>
 
 <aside class="sidebar">
-  {#if stage.id === 1}
+  {#if stage.view === "settings"}
+    <Settings />
+  {:else if stage.id === 1}
     <Stage1Input />
   {:else if stage.id === 2}
     <Stage2Cleaning />

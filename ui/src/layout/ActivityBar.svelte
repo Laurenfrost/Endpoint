@@ -1,17 +1,19 @@
 <script>
-  // 最左 ~56px 活动栏。点击切阶段。
-  import { stage, setStage, STAGE_DEFS } from "../stores/stage.svelte.js";
+  // 最左 ~56px 活动栏。上方:四个阶段;下方:设置入口 + LLM 状态指示。
+  import { stage, setStage, toggleSettings, STAGE_DEFS } from "../stores/stage.svelte.js";
   import { pipeline } from "../stores/pipeline.svelte.js";
-
   import { llm } from "../stores/llm.svelte.js";
 
   // 阶段 2-4 需要先加载 pipeline 才能访问。
   const stageEnabled = (id) => id === 1 || !!pipeline.dto;
+
+  // 高亮规则:view 为 stage 时高亮当前 stage;view 为 settings 时四个阶段都不亮。
+  const isStageActive = (id) => stage.view === "stage" && stage.id === id;
 </script>
 
-<nav class="activity-bar" aria-label="阶段导航">
+<nav class="activity-bar" aria-label="导航">
   {#each STAGE_DEFS as def (def.id)}
-    {@const active = stage.id === def.id}
+    {@const active = isStageActive(def.id)}
     {@const enabled = stageEnabled(def.id)}
     <button
       class="item"
@@ -25,10 +27,20 @@
       <span class="badge">{def.id}</span>
     </button>
   {/each}
+
   <div class="spacer"></div>
-  <div class="llm-status" title={llm.configured ? `LLM 已配置: ${llm.model || llm.baseUrl}` : "LLM 未配置"}>
-    <span class="llm-dot" class:on={llm.configured}></span>
-  </div>
+
+  <button
+    class="item settings"
+    class:active={stage.view === "settings"}
+    title="设置(LLM / 搜索 / kepubify)"
+    onclick={toggleSettings}
+    aria-label="设置"
+  >
+    <span class="icon" aria-hidden="true">⚙</span>
+    <span class="llm-dot" class:on={llm.configured}
+      title={llm.configured ? `LLM 已配置: ${llm.model || llm.baseUrl}` : "LLM 未配置"}></span>
+  </button>
 </nav>
 
 <style>
@@ -67,19 +79,22 @@
     font-family: Consolas, "Cascadia Mono", monospace;
   }
   .spacer { flex: 1; }
-  .llm-status {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    padding: 10px 0;
-    cursor: default;
+  .item.settings {
+    padding: 10px 0 12px 0;
+    position: relative;
   }
-  .llm-dot {
-    width: 8px;
-    height: 8px;
+  .item.settings .icon { font-size: 20px; }
+  .item.settings .llm-dot {
+    position: absolute;
+    bottom: 8px;
+    right: 12px;
+    width: 7px;
+    height: 7px;
     border-radius: 50%;
     background: #52606d;
+    box-shadow: 0 0 0 2px #2c3440;
     transition: background 0.2s;
   }
-  .llm-dot.on { background: #4caf50; }
+  .item.settings.active .llm-dot { box-shadow: 0 0 0 2px #3a4452; }
+  .item.settings .llm-dot.on { background: #4caf50; }
 </style>

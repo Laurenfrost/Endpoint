@@ -1,12 +1,14 @@
 <script>
-  // 阶段 4:样式预览与导出。4.0 封面+CSS 覆盖;4.1 字体嵌入;4.2 CSS 主题预设+编辑器。
+  // 阶段 4:样式预览与导出。封面 + CSS + 字体嵌入 + 元数据。
+  // LLM / 搜索 / kepubify 配置已搬到 ⚙ 设置面板;本阶段只读取持久化的 kepubify 配置并用于本次生成。
   import { pipeline } from "../stores/pipeline.svelte.js";
   import { progress, setBusy } from "../stores/progress.svelte.js";
+  import { openSettings } from "../stores/stage.svelte.js";
   import {
-    pickOutputFile, pickExecutableFile, pickCoverFile, pickFontFile,
+    pickOutputFile, pickCoverFile, pickFontFile,
     buildEpub, listThemes, loadTheme, generateTextCover,
-    getLlmConfig, setLlmConfig, setSearchConfig, suggestMetadata,
-    getKepubifyConfig, setKepubifyConfig,
+    getLlmConfig, suggestMetadata,
+    getKepubifyConfig,
   } from "../ipc.js";
   import { llm, applyLlmConfig } from "../stores/llm.svelte.js";
   import { serializeForIpc, decisionCount } from "../stores/decisions.svelte.js";
@@ -16,13 +18,11 @@
   let outputPath = $state("");
   let title = $state("");
   let author = $state("");
-  // 扩展元数据(可选,Stage4 表单)
+  // 扩展元数据
   let description = $state("");
-  let subjectsText = $state("");   // 逗号分隔输入,提交时 split
+  let subjectsText = $state("");
   let series = $state("");
-  let seriesIndexText = $state(""); // 输入框文本,提交时 parseInt
-  let kepubifyPath = $state("");
-  let kepubifyEnabled = $state(false);
+  let seriesIndexText = $state("");
   // 封面
   let coverMode = $state("none");       // "none" | "file" | "text"
   let coverPath = $state("");
@@ -34,27 +34,18 @@
   let fontSource = $state("builtin");
   let customFontPath = $state("");
   // CSS 主题
-  let themes = $state([]);          // 主题名称列表
-  let selectedTheme = $state("");   // 当前选中主题名;"" = 自定义
-  let cssText = $state("");         // textarea 内容
-  let cssExpanded = $state(false);  // 高级 CSS 展开状态
+  let themes = $state([]);
+  let selectedTheme = $state("");
+  let cssText = $state("");
+  let cssExpanded = $state(false);
   let loadingTheme = $state(false);
-  // LLM 配置
-  let llmOpen = $state(false);
-  let llmBaseUrl = $state("");
-  let llmModel = $state("");
-  let llmApiKey = $state("");
-  let llmSaving = $state(false);
-  let llmMsg = $state("");
-  // Brave 搜索配置(Pass B 兜底)
-  let searchProvider = $state("brave");
-  let searchApiKey = $state("");
-  let searchSaving = $state(false);
-  let searchMsg = $state("");
-  // LLM 元数据建议(4.6)
+  // LLM 元数据建议
   let suggesting = $state(false);
-  let suggestion = $state(null);   // { title?, author?, description?, cover_keywords?, subjects?, series?, series_index? } | null
+  let suggestion = $state(null);
   let suggestionMsg = $state("");
+  // kepubify(只读,从持久化配置加载)
+  let kepubifyPath = $state("");
+  let kepubifyEnabled = $state(false);
   // 结果
   let error = $state("");
   let result = $state("");
@@ -80,6 +71,19 @@
     }
   });
 
+  // 进入阶段时同步 LLM 状态(供"从正文建议"按钮显示状态)
+  $effect(() => {
+    getLlmConfig().then(applyLlmConfig).catch(() => {});
+  });
+
+  // 进入阶段时读取持久化的 kepubify 配置
+  $effect(() => {
+    getKepubifyConfig().then(cfg => {
+      kepubifyPath = cfg.path ?? "";
+      kepubifyEnabled = !!cfg.enabled;
+    }).catch(() => {});
+  });
+
   async function onSelectTheme(name) {
     if (name === selectedTheme) return;
     loadingTheme = true;
@@ -95,7 +99,6 @@
   }
 
   function onCssInput() {
-    // 用户直接编辑了 textarea → 切换为自定义
     selectedTheme = "";
   }
 
@@ -104,38 +107,6 @@
       const p = await pickOutputFile(outputPath || null);
       if (typeof p === "string") outputPath = p;
     } catch (e) { error = String(e); }
-  }
-
-  async function persistKepubify(path, enabled) {
-    try {
-      await setKepubifyConfig(path, enabled);
-    } catch (e) {
-      // 持久化失败不阻塞本次生成,只在控制台留痕
-      console.error("保存 kepubify 配置失败:", e);
-    }
-  }
-
-  async function onPickKepubify() {
-    try {
-      const p = await pickExecutableFile();
-      if (typeof p === "string") {
-        kepubifyPath = p;
-        // 首次选择路径默认启用,避免用户「选了文件却忘了勾选」的常见误操作
-        if (!kepubifyEnabled) kepubifyEnabled = true;
-        persistKepubify(kepubifyPath, kepubifyEnabled);
-      }
-    } catch (e) { error = String(e); }
-  }
-
-  function onClearKepubify() {
-    kepubifyPath = "";
-    kepubifyEnabled = false;
-    persistKepubify("", false);
-  }
-
-  function onToggleKepubifyEnabled() {
-    // bind:checked 已经把新值写进了 kepubifyEnabled,这里只负责持久化
-    persistKepubify(kepubifyPath, kepubifyEnabled);
   }
 
   async function onPickCover() {
@@ -172,71 +143,16 @@
     } catch (e) { error = String(e); }
   }
 
-  // 进入阶段时加载当前 LLM + 搜索配置
-  $effect(() => {
-    getLlmConfig().then(cfg => {
-      applyLlmConfig(cfg);
-      llmBaseUrl = cfg.base_url ?? "";
-      llmModel = cfg.model ?? "";
-      llmApiKey = "";  // 不预填 key,让用户重新输入
-      searchProvider = cfg.search_provider || "brave";
-      searchApiKey = "";
-    }).catch(() => {});
-  });
-
-  // 进入阶段时加载持久化的 kepubify 配置
-  $effect(() => {
-    getKepubifyConfig().then(cfg => {
-      kepubifyPath = cfg.path ?? "";
-      kepubifyEnabled = !!cfg.enabled;
-    }).catch(() => {});
-  });
-
-  function onToggleLlm() {
-    llmOpen = !llmOpen;
-    llmMsg = "";
-  }
-
-  async function onSaveLlm() {
-    if (!llmBaseUrl.trim()) {
-      llmMsg = "请填写 API 接口地址(base_url),不是用 placeholder 里的示例。";
-      return;
-    }
-    if (!llmModel.trim()) {
-      llmMsg = "请填写模型名。";
-      return;
-    }
-    llmSaving = true;
-    llmMsg = "";
-    try {
-      await setLlmConfig(llmBaseUrl, llmModel, llmApiKey);
-      const cfg = await getLlmConfig();
-      applyLlmConfig(cfg);
-      if (llm.configured) {
-        llmMsg = "✓ 已保存并连接";
-      } else if (cfg.key_set) {
-        llmMsg = "已保存,但 LLM 功能未启用(base_url 或模型为空)";
-      } else {
-        llmMsg = "已保存(未填 API key,LLM 功能未启用)";
-      }
-      llmApiKey = "";
-    } catch (e) {
-      llmMsg = `保存失败: ${e}`;
-    } finally {
-      llmSaving = false;
-    }
-  }
-
   async function onSuggestMetadata() {
     suggesting = true;
     suggestion = null;
     suggestionMsg = "";
     try {
-      const result = await suggestMetadata();
-      if (!result) {
-        suggestionMsg = llm.configured ? "LLM 无法从正文推断元数据" : "请先在下方配置 LLM";
+      const r = await suggestMetadata();
+      if (!r) {
+        suggestionMsg = llm.configured ? "LLM 无法从正文推断元数据" : "请先在 ⚙ 设置中配置 LLM";
       } else {
-        suggestion = result;
+        suggestion = r;
       }
     } catch (e) {
       suggestionMsg = String(e);
@@ -274,32 +190,6 @@
     suggestionMsg = "";
   }
 
-  async function onSaveSearch() {
-    if (searchProvider && !searchApiKey && !llm.searchKeyMasked) {
-      searchMsg = "请填写 Brave API Key,或留空 provider 字段禁用搜索。";
-      return;
-    }
-    searchSaving = true;
-    searchMsg = "";
-    try {
-      await setSearchConfig(searchProvider.trim(), searchApiKey);
-      const cfg = await getLlmConfig();
-      applyLlmConfig(cfg);
-      if (llm.searchConfigured) {
-        searchMsg = "✓ 已保存,搜索后端可用";
-      } else if (!searchProvider.trim()) {
-        searchMsg = "已保存(已禁用搜索,LLM 只用训练知识)";
-      } else {
-        searchMsg = "已保存,但搜索未启用(provider 或 key 为空)";
-      }
-      searchApiKey = "";
-    } catch (e) {
-      searchMsg = `保存失败: ${e}`;
-    } finally {
-      searchSaving = false;
-    }
-  }
-
   async function onBuild() {
     if (!outputPath) return (error = "请先选择输出位置");
     if (!title || !author) return (error = "请填写书名与作者");
@@ -310,19 +200,16 @@
     setBusy(true);
     try {
       const decisions = serializeForIpc();
-      // 解析 subjects:逗号/顿号/分号都接受,去重去空
       const subjectsArr = subjectsText
         .split(/[,，、;；]/)
         .map(s => s.trim())
         .filter((s, i, arr) => s && arr.indexOf(s) === i);
-      // 解析 series_index:非整数 / 空 → null
       const idxParsed = parseInt(seriesIndexText, 10);
       const seriesIdx = Number.isFinite(idxParsed) && idxParsed > 0 ? idxParsed : null;
       const finalPath = await buildEpub({
         outputPath,
         title,
         author,
-        // 未勾选或没路径就跳过 kepubify;后端只看 path 是否非 null。
         kepubifyPath: (kepubifyEnabled && kepubifyPath) ? kepubifyPath : null,
         decisions: decisions.length > 0 ? decisions : null,
         coverPath: coverPath || null,
@@ -393,17 +280,20 @@
         <button
           class="suggest-btn"
           onclick={onSuggestMetadata}
-          disabled={progress.busy || suggesting || !pipeline.dto}
+          disabled={progress.busy || suggesting || !pipeline.dto || !llm.configured}
           title={llm.configured
             ? (llm.searchConfigured
                 ? "Pass A:LLM 训练知识 → Pass B(必要时):Brave 搜索补全"
                 : "Pass A:LLM 训练知识(未配 Brave,冷门作品可能识别不到)")
-            : "请先在下方 LLM 设置中配置 API key"}
+            : "请先在 ⚙ 设置中配置 LLM"}
         >
           {suggesting ? "推断中..." : "从正文建议 ▸"}
         </button>
         {#if llm.searchConfigured}
           <span class="hint search-on">+ Brave 搜索兜底</span>
+        {/if}
+        {#if !llm.configured}
+          <button class="link-btn" onclick={openSettings}>去配置 →</button>
         {/if}
         {#if suggestionMsg}<span class="hint suggest-hint">{suggestionMsg}</span>{/if}
       </div>
@@ -593,133 +483,25 @@
       {/if}
     </div>
 
-    <!-- LLM 配置 -->
-    <div class="section">
-      <div class="section-header">
-        <span class="section-title">
-          LLM 设置
-          {#if llm.configured}
-            <span class="llm-dot configured" title="已配置 LLM"></span>
-          {:else}
-            <span class="llm-dot" title="未配置 LLM"></span>
-          {/if}
-        </span>
-        <button class="link-btn" onclick={onToggleLlm}>
-          {llmOpen ? "收起 ▲" : "配置 ▼"}
-        </button>
-      </div>
-      {#if !llmOpen}
-        <p class="hint" style="margin:0">
-          {llm.configured ? `已配置(${llm.keyMasked})` : "未配置 — LLM 功能(仲裁/规则归纳/元数据建议)不可用"}
-        </p>
-      {:else}
-        <div class="inset llm-form">
-          <label>
-            <span>API 接口地址 base_url <em class="required">必填</em></span>
-            <input type="text" bind:value={llmBaseUrl}
-              placeholder="例如:https://api.deepseek.com"
-              disabled={llmSaving} />
-            <span class="field-hint">需要你自己填写。OpenAI 兼容的 chat completions 服务都可以(DeepSeek / 本地 Ollama / OpenAI 等)。</span>
-          </label>
-          <label>
-            <span>模型 <em class="required">必填</em></span>
-            <input type="text" bind:value={llmModel}
-              placeholder="例如:deepseek-chat"
-              disabled={llmSaving} />
-          </label>
-          <label>
-            <span>API Key {llm.configured ? `(当前: ${llm.keyMasked})` : ""}</span>
-            <input type="password" bind:value={llmApiKey}
-              placeholder="留空保持原 key 不变"
-              disabled={llmSaving} />
-          </label>
-          <div class="row" style="justify-content:flex-end;gap:6px;">
-            <button onclick={onSaveLlm} disabled={llmSaving}>
-              {llmSaving ? "保存中..." : "保存"}
-            </button>
-          </div>
-          {#if llmMsg}<p class="hint" style="margin:4px 0 0">{llmMsg}</p>{/if}
-          <p class="hint" style="margin:4px 0 0;color:#9aa">
-            API key 明文存储于 AppData\Endpoint\config.toml,仅限本机使用。
-            兼容 OpenAI /v1/chat/completions 协议(DeepSeek / OpenAI / 本地 Ollama)。
-          </p>
-
-          <hr class="llm-divider" />
-          <div class="search-config-block">
-            <div class="search-config-title">
-              Web 搜索后端(可选)
-              {#if llm.searchConfigured}
-                <span class="llm-dot configured" title="搜索已配置"></span>
-              {/if}
-            </div>
-            <p class="hint search-explain">
-              冷门作品 LLM 训练知识识别不到时,会用搜索结果补全分类/系列/简介。
-              留空 provider 即可禁用搜索,LLM 只用训练知识。
-            </p>
-            <label>
-              <span>Provider</span>
-              <input type="text" bind:value={searchProvider}
-                placeholder="brave(留空 = 禁用搜索)"
-                disabled={searchSaving} />
-              <span class="field-hint">目前仅支持 <code>brave</code>。在 <a href="https://brave.com/search/api/" target="_blank">brave.com/search/api</a> 注册免费 2000 次/月。</span>
-            </label>
-            <label>
-              <span>Brave API Key {llm.searchConfigured ? `(当前: ${llm.searchKeyMasked})` : ""}</span>
-              <input type="password" bind:value={searchApiKey}
-                placeholder="留空保持原 key 不变"
-                disabled={searchSaving} />
-            </label>
-            <div class="row" style="justify-content:flex-end;gap:6px;">
-              <button onclick={onSaveSearch} disabled={searchSaving}>
-                {searchSaving ? "保存中..." : "保存搜索配置"}
-              </button>
-            </div>
-            {#if searchMsg}<p class="hint" style="margin:4px 0 0">{searchMsg}</p>{/if}
-          </div>
-        </div>
-      {/if}
-    </div>
-
-    <!-- kepubify -->
-    <div class="section kepubify-block">
-      <div class="section-header">
-        <span class="section-title">kepubify 优化(可选)</span>
-      </div>
-      <label class="check-label kepubify-toggle">
-        <input
-          type="checkbox"
-          bind:checked={kepubifyEnabled}
-          onchange={onToggleKepubifyEnabled}
-          disabled={progress.busy || !kepubifyPath}
-        />
-        生成 .kepub.epub(Kobo 设备排版/分页体验更好)
-      </label>
-      <div class="row">
-        <input type="text" value={kepubifyPath} readonly
-          placeholder="未设置 kepubify.exe 路径 — 点选择"
-          disabled={progress.busy} />
-        <button onclick={onPickKepubify} disabled={progress.busy}>选择</button>
-        {#if kepubifyPath}
-          <button onclick={onClearKepubify} disabled={progress.busy} title="清除路径">✕</button>
-        {/if}
-      </div>
-      <p class="hint kepubify-hint">
-        {#if !kepubifyPath}
-          只生成标准 .epub。路径设过一次后会自动记住,无需每次重选。
-        {:else if !kepubifyEnabled}
-          已记住路径但本次不跑 kepubify,只出 .epub。
-        {:else}
-          将额外跑 kepubify 生成 .kepub.epub。
-        {/if}
-      </p>
-    </div>
-
+    <!-- 生成 -->
     <button class="primary" onclick={onBuild} disabled={progress.busy}>
       {progress.busy ? "生成中..." : "生成 EPUB"}
     </button>
-    {#if decisionCount() > 0}
-      <p class="hint" style="margin-top:6px;">将随生成应用 <strong>{decisionCount()}</strong> 条用户决策。</p>
-    {/if}
+
+    <!-- 状态提示 -->
+    <div class="status-hints">
+      {#if kepubifyEnabled && kepubifyPath}
+        <p class="hint ok-hint">✓ 将额外生成 .kepub.epub</p>
+      {:else}
+        <p class="hint">
+          只生成标准 .epub。
+          <button class="link-btn" onclick={openSettings}>在设置中启用 kepubify →</button>
+        </p>
+      {/if}
+      {#if decisionCount() > 0}
+        <p class="hint">将随生成应用 <strong>{decisionCount()}</strong> 条用户决策。</p>
+      {/if}
+    </div>
 
     {#if error}<div class="error">{error}</div>{/if}
     {#if result}<div class="ok">✓ {result}</div>{/if}
@@ -765,6 +547,7 @@
   }
   button.primary:hover:not(:disabled) { background: #1858c4; }
   .hint { font-size: 11px; color: #52606d; }
+  .ok-hint { color: #2e7d32; }
   .cover-mode-row {
     display: flex;
     gap: 12px;
@@ -780,7 +563,6 @@
     border: 1px solid #cbd2d9;
     border-radius: 4px;
   }
-  /* 通用 section 容器 */
   .section {
     margin-bottom: 12px;
     font-size: 12px;
@@ -808,7 +590,6 @@
   }
   .checkbox-label input[type=checkbox],
   .radio-label input[type=radio] { margin: 0; width: auto; }
-  /* CSS 主题区域 */
   .section-header {
     display: flex;
     align-items: center;
@@ -847,7 +628,6 @@
     border: 1px dashed #cbd2d9;
     border-radius: 12px;
   }
-  /* 元数据建议 */
   .meta-group { margin-bottom: 12px; }
   .meta-group label { margin-bottom: 8px; }
   .suggest-row {
@@ -855,6 +635,7 @@
     align-items: center;
     gap: 8px;
     margin-bottom: 8px;
+    flex-wrap: wrap;
   }
   .suggest-btn {
     font-size: 11px;
@@ -883,32 +664,6 @@
     border: 1px solid #cbd2d9;
     border-radius: 3px;
   }
-  .llm-divider {
-    border: 0;
-    border-top: 1px dashed #cbd2d9;
-    margin: 12px 0 10px;
-  }
-  .search-config-block .search-config-title {
-    font-weight: 600;
-    color: #1f6feb;
-    margin-bottom: 4px;
-    font-size: 12px;
-  }
-  .search-explain { margin: 0 0 8px; color: #6b7280; }
-  .search-config-block a { color: #1f6feb; }
-  .kepubify-block .kepubify-toggle {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-bottom: 6px;
-    font-size: 12px;
-    color: #1f2933;
-  }
-  .kepubify-block .kepubify-toggle input[type="checkbox"]:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-  .kepubify-hint { margin: 4px 0 0; }
   .suggestion-panel {
     background: #f0f7ff;
     border: 1px solid #b3d4ff;
@@ -946,35 +701,6 @@
     flex-shrink: 0;
   }
   .sug-apply:hover { background: #e8f0fe; }
-  .llm-dot {
-    display: inline-block;
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #cbd2d9;
-    margin-left: 4px;
-    vertical-align: middle;
-  }
-  .llm-dot.configured { background: #2e7d32; }
-  .llm-form label { margin-bottom: 8px; }
-  .llm-form label span { display: block; margin-bottom: 2px; }
-  .llm-form .required {
-    display: inline-block;
-    margin-left: 6px;
-    padding: 0 5px;
-    background: #ffe4e6;
-    color: #b42318;
-    border-radius: 3px;
-    font-size: 10px;
-    font-style: normal;
-    vertical-align: middle;
-  }
-  .llm-form .field-hint {
-    display: block;
-    margin-top: 3px;
-    font-size: 11px;
-    color: #6b7280;
-  }
   .css-editor {
     display: block;
     width: 100%;
@@ -990,6 +716,13 @@
     resize: vertical;
     box-sizing: border-box;
   }
+  .status-hints {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .status-hints .hint { margin: 0; }
   .error {
     margin-top: 10px;
     padding: 8px 10px;
