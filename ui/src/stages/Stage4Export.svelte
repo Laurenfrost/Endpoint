@@ -11,7 +11,7 @@
   import { llm, applyLlmConfig } from "../stores/llm.svelte.js";
   import { serializeForIpc, decisionCount } from "../stores/decisions.svelte.js";
 
-  const THEME_LABELS = { standard: "标准", classic: "古风", highcontrast: "高对比度" };
+  const THEME_LABELS = { easypub: "EasyPub", standard: "标准", classic: "古风", highcontrast: "高对比度" };
 
   let outputPath = $state("");
   let title = $state("");
@@ -71,7 +71,9 @@
     if (pipeline.dto && themes.length === 0) {
       listThemes().then(list => {
         themes = list;
-        if (list.includes("standard")) {
+        if (list.includes("easypub")) {
+          onSelectTheme("easypub");
+        } else if (list.includes("standard")) {
           onSelectTheme("standard");
         }
       }).catch(() => {});

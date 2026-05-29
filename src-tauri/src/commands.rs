@@ -505,7 +505,7 @@ pub async fn cancel_task(
 // ============== 阶段四 4.2:CSS 主题 ==============
 
 /// 列出可用主题名称列表(resource themes/ 目录下所有 .css 文件的 stem)。
-/// 顺序固定:standard → classic → highcontrast;其余按字母序追加。
+/// 顺序固定:easypub → standard → classic → highcontrast;其余按字母序追加。
 #[tauri::command]
 pub async fn list_themes(app: AppHandle) -> Result<Vec<String>, String> {
     let themes_dir = app
@@ -527,8 +527,8 @@ pub async fn list_themes(app: AppHandle) -> Result<Vec<String>, String> {
         })
         .collect();
 
-    // 把内置三主题置前,其余按字母序
-    let priority = ["standard", "classic", "highcontrast"];
+    // 把内置主题置前(默认 easypub 在最前),其余按字母序
+    let priority = ["easypub", "standard", "classic", "highcontrast"];
     names.sort_by(|a, b| {
         let ia = priority.iter().position(|&p| p == a).unwrap_or(usize::MAX);
         let ib = priority.iter().position(|&p| p == b).unwrap_or(usize::MAX);

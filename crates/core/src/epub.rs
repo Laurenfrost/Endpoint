@@ -418,7 +418,7 @@ fn chapter_xhtml(ch: &Chapter) -> String {
   <link rel="stylesheet" type="text/css" href="styles.css"/>
 </head>
 <body>
-  <h1>{title}</h1>
+  <h1 class="titlel2std">{title}</h1>
 {paras}</body>
 </html>
 "#,
@@ -439,7 +439,7 @@ fn volume_xhtml(v: &Volume) -> String {
   <link rel="stylesheet" type="text/css" href="styles.css"/>
 </head>
 <body>
-  <h1 class="volume-title">{title}</h1>
+  <h1 class="volume-title titlel2single">{title}</h1>
 </body>
 </html>
 "#,
