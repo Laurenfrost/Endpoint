@@ -3,14 +3,11 @@
   //
   // 数据流(阶段三 3.3 镜像后):
   //   - pipeline.cleaning 中 kind 是 5 种格式整理变体之一 → cleaning 列表 + 红层
-  //     (v2 起从 4 拆细为 5:LeadingFullwidthSpace / InlineFullwidthSpace 拆开)
   //   - pipeline.cleaning 中 kind 是 watermark_* 变体之一 → 来自 auto 水印镜像 → 橙层
-  //                                                          (不进 cleaning 列表,只在水印列表里显示)
   //   - pipeline.watermark 全量(auto + suspect)→ 水印列表;suspect → 黄层
-  //
-  // v2 新增:顶部"清洗策略"折叠面板——勾选改动后亮起"重新分析"按钮,点了重跑管线。
-  //
-  // 颜色与命名详见 `docs/stage3-design.md` 第六节 6.2 + `docs/stage3-v2-design.md` 第三节。
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import X from "@lucide/svelte/icons/x";
   import { pipeline } from "../stores/pipeline.svelte.js";
   import {
     setLayers,
@@ -31,8 +28,13 @@
     decisionCount,
   } from "../stores/decisions.svelte.js";
   import { onDestroy } from "svelte";
+  import { Button } from "$lib/components/ui/button/index.js";
+  import { Checkbox } from "$lib/components/ui/checkbox/index.js";
+  import { Slider } from "$lib/components/ui/slider/index.js";
+  import { Badge } from "$lib/components/ui/badge/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
+  import { cn } from "$lib/utils.js";
 
-  // v2 起 8 项 CleaningKind 的中文 label;watermark_* 三项来自 auto 镜像
   const KIND_LABEL = {
     blank_line_compression: "空行压缩",
     leading_fullwidth_space: "段首全角缩进",
@@ -52,8 +54,6 @@
   };
 
   // —— v2 清洗策略面板 ——
-  // 默认值与后端 CleaningConfig::default() 严格对齐;改后 dirty=true → 亮"重新分析"。
-  // **v2 调整后:全 5 项默认关**——智能默认 = "不动用户文本",清洗策略改为用户主动开启。
   const CLEANING_DEFAULT = {
     blank_line_compression: false,
     leading_fullwidth_space: false,
@@ -69,10 +69,9 @@
   let strategyOpen = $state(false);
 
   // —— v2.1 水印阈值/权重面板 ——
-  // 默认值与后端 WatermarkConfig::default() 严格对齐;改后 dirty 同 cleaning 联动。
   const WM_DEFAULT = {
     auto_threshold: 0.70,
-    suspect_threshold: 0.42, // v2:从 0.35 上调,单特征(0.40)不再 ≥ suspect
+    suspect_threshold: 0.42,
     w_repeat: 0.40,
     w_non_cjk: 0.20,
     w_keyword: 0.40,
@@ -87,7 +86,6 @@
   );
   let wmThresholdOpen = $state(false);
 
-  // 共用的 dirty / 重新分析
   const anyDirty = $derived(cleaningDirty || wmDirty);
   let reanalyzing = $state(false);
   let reanalyzeError = $state("");
@@ -97,7 +95,6 @@
       reanalyzeError = "无源文件路径,无法重新分析";
       return;
     }
-    // v2.2:重新分析会让 spans 全部失效,决策也跟着丢
     const dropping = decisionCount();
     if (dropping > 0) {
       const ok = window.confirm(
@@ -119,7 +116,7 @@
       setPipeline(dto, pipeline.sourcePath);
       cleaningLastApplied = { ...cfg };
       wmLastApplied = { ...wmCfg };
-      clearAllDecisions(); // 清空全部决策
+      clearAllDecisions();
     } catch (e) {
       reanalyzeError = String(e);
     } finally {
@@ -128,20 +125,10 @@
     }
   }
 
-  // —— v2.2 决策辅助函数 ——
-  function getCleaningDecision(span) {
-    return getDecision("cleaning", span);
-  }
-  function getWmDecision(span) {
-    return getDecision("watermark", span);
-  }
-  function toggleCleaningDecision(span, want) {
-    toggleDecision("cleaning", span, want);
-  }
-  function toggleWmDecision(span, want) {
-    toggleDecision("watermark", span, want);
-  }
-  // 批量栏:接受 / 拒绝 / 重置当前 tab 可见列表
+  function getCleaningDecision(span) { return getDecision("cleaning", span); }
+  function getWmDecision(span) { return getDecision("watermark", span); }
+  function toggleCleaningDecision(span, want) { toggleDecision("cleaning", span, want); }
+  function toggleWmDecision(span, want) { toggleDecision("watermark", span, want); }
   function bulkApproveCleaning() { bulkSet("cleaning", cleaningItems.map((c) => c.span), "approved"); }
   function bulkRejectCleaning()  { bulkSet("cleaning", cleaningItems.map((c) => c.span), "rejected"); }
   function bulkClearCleaning()   { bulkClear("cleaning", cleaningItems.map((c) => c.span)); }
@@ -149,19 +136,16 @@
   function bulkRejectWm()  { bulkSet("watermark", wmFiltered.map((w) => w.span), "rejected"); }
   function bulkClearWm()   { bulkClear("watermark", wmFiltered.map((w) => w.span)); }
 
-  // —— 水印阈值面板的字段元数据(label / step / kind) ——
   const WM_FIELDS = [
     { key: "auto_threshold", label: "auto 阈值", kind: "float", min: 0, max: 1, step: 0.05, hint: "≥ 此值自动删除(默认 0.70)" },
-    { key: "suspect_threshold", label: "suspect 阈值", kind: "float", min: 0, max: 1, step: 0.01, hint: "≥ 此值进灰区(默认 0.42,单特征 0.40 不再触发)" },
+    { key: "suspect_threshold", label: "suspect 阈值", kind: "float", min: 0, max: 1, step: 0.01, hint: "≥ 此值进灰区(默认 0.42)" },
     { key: "w_repeat", label: "行频权重", kind: "float", min: 0, max: 1, step: 0.05, hint: "默认 0.40" },
     { key: "w_non_cjk", label: "非中文权重", kind: "float", min: 0, max: 1, step: 0.05, hint: "默认 0.20" },
     { key: "w_keyword", label: "关键词权重", kind: "float", min: 0, max: 1, step: 0.05, hint: "默认 0.40" },
     { key: "repeat_count_min", label: "行频最小次数", kind: "int", min: 1, max: 100, step: 1, hint: "默认 5" },
-    { key: "min_line_chars", label: "短行豁免字符数", kind: "int", min: 1, max: 50, step: 1, hint: "默认 10 (v2 起从 4 上调)" },
+    { key: "min_line_chars", label: "短行豁免字符数", kind: "int", min: 1, max: 50, step: 1, hint: "默认 10" },
   ];
 
-  // —— 数据派生 ——
-  // 清洗列表只显示阶段二的 5 种格式整理变体(把 watermark_* 镜像剔除,后者在水印列表里看)。
   const cleaningItems = $derived(
     (pipeline.dto?.cleaning ?? []).filter((c) => !c.kind.startsWith("watermark_"))
   );
@@ -170,14 +154,12 @@
     for (const c of cleaningItems) m[c.kind] = (m[c.kind] ?? 0) + 1;
     return m;
   });
-  // auto 水印镜像在 cleaning 里的 span
   const autoMirrorSpans = $derived(
     (pipeline.dto?.cleaning ?? [])
       .filter((c) => c.kind.startsWith("watermark_"))
       .map((c) => c.span)
   );
 
-  // 水印列表(全部 verdict)
   const watermarkItems = $derived(pipeline.dto?.watermark ?? []);
   const wmCounts = $derived.by(() => {
     let auto = 0, suspect = 0;
@@ -187,21 +169,10 @@
     }
     return { auto, suspect, total: watermarkItems.length };
   });
-  // suspect span(用于黄色高亮层)
   const suspectSpans = $derived(
-    watermarkItems
-      .filter((w) => w.verdict === "suspect")
-      .map((w) => w.span)
+    watermarkItems.filter((w) => w.verdict === "suspect").map((w) => w.span)
   );
 
-  // —— v2.2 effective view ——
-  // 用户决策叠加后,实际进 EPUB 的删除集合(也是文本区高亮的来源):
-  //   - cleaning rejected → 不进红层
-  //   - watermark auto rejected → 不进橙层
-  //   - watermark suspect approved → 升级到橙层(等效 auto)
-  //   - watermark suspect rejected → 仍在黄层(用户可视化)
-  // 这层派生让正文高亮 / OverviewRuler 与最终 EPUB 输出**口径一致**。
-  // 依赖 decisions.map(reactive)。
   function spanMatches(targetMap, scope, span) {
     return targetMap[`${scope}:${span.start}-${span.end}`];
   }
@@ -212,13 +183,11 @@
   );
   const effectiveAutoOrangeSpans = $derived.by(() => {
     const out = [];
-    // 原 auto 镜像(过滤被 rejected 的)
     for (const span of autoMirrorSpans) {
       if (spanMatches(decisions.map, "watermark", span) !== "rejected") {
         out.push(span);
       }
     }
-    // approved 的 suspect 也升级到橙
     for (const w of watermarkItems) {
       if (w.verdict === "suspect" && spanMatches(decisions.map, "watermark", w.span) === "approved") {
         out.push(w.span);
@@ -227,11 +196,9 @@
     return out;
   });
   const effectiveSuspectYellowSpans = $derived(
-    // suspect 仍在黄色(approved 升橙后,这里要扣掉)
     suspectSpans.filter((span) => spanMatches(decisions.map, "watermark", span) !== "approved")
   );
 
-  // 注入三层 annotations(effective view 驱动)。
   $effect(() => {
     if (!pipeline.dto) {
       clearLayers();
@@ -240,7 +207,7 @@
     setLayers([
       {
         id: "cleaning_format",
-        color: "rgba(220, 53, 69, 0.55)",
+        color: "var(--hl-cleaning)",
         className: "hl-cleaning",
         items: effectiveCleaningRedSpans.map((span) => ({ span })),
       },
@@ -261,7 +228,6 @@
 
   onDestroy(() => clearLayers());
 
-  // —— 上下文预览(共用) ——
   function preview(span) {
     const t = pipeline.dto.source_text;
     const ix = pipeline.byteIndex;
@@ -273,7 +239,6 @@
     return { before, target, after };
   }
 
-  // —— 清洗列表(上半屏) ——
   let cleaningSelected = $state(-1);
   function jumpCleaning(idx) {
     cleaningSelected = idx;
@@ -285,8 +250,7 @@
     cleaningVisible = Math.min(cleaningItems.length, cleaningVisible + CLEAN_PAGE);
   }
 
-  // —— 水印列表(下半屏) ——
-  let wmTab = $state("all"); // all | auto | suspect
+  let wmTab = $state("all");
   let wmSelected = $state(-1);
   const WM_PAGE = 200;
   let wmVisible = $state(WM_PAGE);
@@ -295,7 +259,6 @@
     if (wmTab === "suspect") return watermarkItems.filter((w) => w.verdict === "suspect");
     return watermarkItems;
   });
-  // tab 切换时复位选中与可见量
   $effect(() => {
     void wmTab;
     wmSelected = -1;
@@ -309,17 +272,12 @@
     wmVisible = Math.min(wmFiltered.length, wmVisible + WM_PAGE);
   }
 
-  function formatScore(s) {
-    return (s * 100).toFixed(0) + "%";
-  }
+  function formatScore(s) { return (s * 100).toFixed(0) + "%"; }
 
-  // —— 4.7 LLM 水印仲裁 ——
   let adjudicating = $state(false);
   let adjudicateError = $state("");
-  // 单卡片正在仲裁的 span key("start-end")
   let adjudicatingSpan = $state("");
 
-  /** 把后端返回的仲裁结果写回 pipeline.dto(原地 patch,Svelte 5 深层响应) */
   function applyAdjudicationResult(result) {
     if (!result || !pipeline.dto) return;
     for (const uw of result.updated_watermarks ?? []) {
@@ -329,14 +287,12 @@
       if (idx >= 0) pipeline.dto.watermark[idx] = uw;
     }
     for (const nc of result.new_cleaning ?? []) {
-      // 按 span.start 升序插入
       let pos = pipeline.dto.cleaning.findIndex((c) => c.span.start > nc.span.start);
       if (pos === -1) pos = pipeline.dto.cleaning.length;
       pipeline.dto.cleaning.splice(pos, 0, nc);
     }
   }
 
-  /** 批量仲裁:取当前 suspect 列表全部 span */
   async function onAdjudicateAll() {
     const suspects = watermarkItems.filter((w) => w.verdict === "suspect");
     if (suspects.length === 0) return;
@@ -352,14 +308,12 @@
     }
   }
 
-  // —— 4.8 规则归纳 ——
   let inducing = $state(false);
-  let inducedRule = $state(null);     // { id, pattern, description, ... } | null
+  let inducedRule = $state(null);
   let induceError = $state("");
   let savingRule = $state(false);
   let savedMsg = $state("");
 
-  /** 被用户拒绝的水印 span 列表(从 decisions.map 解析) */
   function getRejectedWmSpans() {
     const spans = [];
     for (const [key, val] of Object.entries(decisions.map)) {
@@ -410,7 +364,6 @@
     }
   }
 
-  /** 单条仲裁:只提交这一条 */
   async function onAdjudicateOne(span) {
     const key = `${span.start}-${span.end}`;
     adjudicatingSpan = key;
@@ -424,30 +377,43 @@
       adjudicatingSpan = "";
     }
   }
+
+  // 给 Slider 包装(它是 array 类型,我们用 single 模式)
+  function sliderValue(key) {
+    return wmCfg[key];
+  }
 </script>
 
-<div class="panel">
-  <h2>2. 文本处理</h2>
+<div class="flex flex-col gap-3 p-3">
+  <h2 class="text-sm font-semibold">2. 文本处理</h2>
 
   {#if !pipeline.dto}
-    <p class="hint">请先在阶段 1 加载文件。</p>
+    <p class="text-xs text-muted-foreground">请先在阶段 1 加载文件。</p>
   {:else}
-    <!-- ============ v2:清洗策略折叠面板 ============ -->
-    <section class="strategy">
-      <button class="strategy-header" onclick={() => (strategyOpen = !strategyOpen)} type="button">
-        <span class="caret">{strategyOpen ? "▼" : "▶"}</span>
+    <!-- ============ 清洗策略折叠面板 ============ -->
+    <section class="overflow-hidden rounded-md border bg-card">
+      <button
+        type="button"
+        class="flex w-full items-center gap-1.5 bg-muted/60 px-2.5 py-1.5 text-left text-[11px] hover:bg-muted"
+        onclick={() => (strategyOpen = !strategyOpen)}
+      >
+        {#if strategyOpen}<ChevronDown class="size-3" />{:else}<ChevronRight class="size-3" />{/if}
         清洗策略
-        <span class="muted">{Object.values(cfg).filter(Boolean).length} / 5 启用</span>
-        {#if cleaningDirty}<span class="dirty-dot" title="改动未应用"></span>{/if}
+        <span class="ml-auto text-[10px] text-muted-foreground">
+          {Object.values(cfg).filter(Boolean).length} / 5 启用
+        </span>
+        {#if cleaningDirty}
+          <span class="size-1.5 rounded-full bg-amber-500 ring-2 ring-amber-500/25"></span>
+        {/if}
       </button>
       {#if strategyOpen}
-        <div class="strategy-body">
+        <div class="flex flex-col gap-1.5 px-2.5 pb-2 pt-2">
           {#each Object.keys(CLEANING_DEFAULT) as k}
-            <label class="strat-row">
-              <input type="checkbox" bind:checked={cfg[k]} />
-              <span class="strat-label">{KIND_LABEL[k] ?? k}</span>
+            <label class="flex cursor-pointer items-center gap-2 text-[11px]">
+              <Checkbox bind:checked={cfg[k]} />
+              <span class="min-w-[88px]">{KIND_LABEL[k] ?? k}</span>
               {#if k === "leading_fullwidth_space"}
-                <span class="strat-hint">中文段首习惯,v2 默认保留</span>
+                <span class="text-[10px] text-muted-foreground">中文段首习惯,默认保留</span>
               {/if}
             </label>
           {/each}
@@ -455,110 +421,136 @@
       {/if}
     </section>
 
-    <!-- ============ v2.1:水印阈值高级折叠面板 ============ -->
-    <section class="strategy">
-      <button class="strategy-header" onclick={() => (wmThresholdOpen = !wmThresholdOpen)} type="button">
-        <span class="caret">{wmThresholdOpen ? "▼" : "▶"}</span>
-        水印阈值 <span class="muted">高级</span>
-        {#if wmDirty}<span class="dirty-dot" title="改动未应用"></span>{/if}
+    <!-- ============ 水印阈值高级折叠面板 ============ -->
+    <section class="overflow-hidden rounded-md border bg-card">
+      <button
+        type="button"
+        class="flex w-full items-center gap-1.5 bg-muted/60 px-2.5 py-1.5 text-left text-[11px] hover:bg-muted"
+        onclick={() => (wmThresholdOpen = !wmThresholdOpen)}
+      >
+        {#if wmThresholdOpen}<ChevronDown class="size-3" />{:else}<ChevronRight class="size-3" />{/if}
+        水印阈值 <span class="text-[10px] text-muted-foreground">高级</span>
+        {#if wmDirty}
+          <span class="ml-auto size-1.5 rounded-full bg-amber-500 ring-2 ring-amber-500/25"></span>
+        {/if}
       </button>
       {#if wmThresholdOpen}
-        <div class="strategy-body">
-          <label class="strat-row">
-            <input type="checkbox" bind:checked={wmCfg.enabled} />
-            <span class="strat-label">启用水印检测</span>
-            <span class="strat-hint">关闭后直接跳过整段水印分析</span>
+        <div class="flex flex-col gap-2 px-2.5 pb-2 pt-2">
+          <label class="flex cursor-pointer items-center gap-2 text-[11px]">
+            <Checkbox bind:checked={wmCfg.enabled} />
+            <span>启用水印检测</span>
+            <span class="text-[10px] text-muted-foreground">关闭后跳过整段水印分析</span>
           </label>
           {#each WM_FIELDS as f}
-            <div class="strat-row strat-numeric">
-              <span class="strat-label">{f.label}</span>
-              <input
-                type="range"
+            <div class="grid grid-cols-[100px_1fr_44px] items-center gap-1.5 text-[11px]">
+              <span>{f.label}</span>
+              <Slider
+                value={sliderValue(f.key)}
+                onValueChange={(v) => (wmCfg[f.key] = v)}
                 min={f.min}
                 max={f.max}
                 step={f.step}
-                bind:value={wmCfg[f.key]}
                 disabled={!wmCfg.enabled}
               />
-              <span class="strat-value">{f.kind === "float" ? Number(wmCfg[f.key]).toFixed(2) : wmCfg[f.key]}</span>
-              <span class="strat-hint">{f.hint}</span>
+              <span class="text-right font-mono text-[10px]">
+                {f.kind === "float" ? Number(wmCfg[f.key]).toFixed(2) : wmCfg[f.key]}
+              </span>
+              <span class="col-span-3 pl-[100px] text-[10px] text-muted-foreground">{f.hint}</span>
             </div>
           {/each}
         </div>
       {/if}
     </section>
 
-    <!-- 共享的"重新分析"按钮 —— cleaning / watermark 任一面板 dirty 时亮起 -->
-    <div class="reanalyze-bar">
-      <button
-        class="reanalyze"
-        class:hot={anyDirty}
+    <!-- 重新分析 -->
+    <div class="flex items-center gap-2">
+      <Button
+        class="flex-1"
+        size="sm"
+        variant={anyDirty ? "default" : "outline"}
         disabled={!anyDirty || reanalyzing}
         onclick={reanalyze}
-        type="button"
       >
         {reanalyzing ? "分析中…" : anyDirty ? "重新分析" : "策略 / 阈值 无改动"}
-      </button>
-      {#if reanalyzeError}<span class="err">{reanalyzeError}</span>{/if}
+      </Button>
     </div>
+    {#if reanalyzeError}
+      <Alert.Root variant="destructive"><Alert.Description>{reanalyzeError}</Alert.Description></Alert.Root>
+    {/if}
 
-    <!-- ============ 上半屏:格式清洗(红色) ============ -->
-    <section class="block">
-      <h3>
-        <span class="dot dot-red"></span>
-        格式清洗 <span class="count">{cleaningItems.length} 条</span>
+    <!-- ============ 格式清洗 ============ -->
+    <section class="flex flex-col gap-2 border-t border-dashed pt-3">
+      <h3 class="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <span class="inline-block size-2 rounded-full bg-red-500/85"></span>
+        格式清洗
+        <span class="ml-auto text-[10px] font-normal normal-case text-muted-foreground/80">
+          {cleaningItems.length} 条
+        </span>
       </h3>
 
       {#if cleaningItems.length === 0}
-        <p class="hint">无格式清洗 —— 文本已经很干净。</p>
+        <p class="text-xs text-muted-foreground">无格式清洗 —— 文本已经很干净。</p>
       {:else}
-        <div class="kinds">
+        <div class="flex flex-wrap gap-1">
           {#each Object.entries(cleaningCounts) as [k, n]}
-            <span class="chip chip-red">{KIND_LABEL[k] ?? k} <strong>{n}</strong></span>
+            <span class="rounded-full border bg-background px-2 py-0.5 text-[10px] text-muted-foreground">
+              {KIND_LABEL[k] ?? k} <strong class="ml-0.5 text-red-700 dark:text-red-400">{n}</strong>
+            </span>
           {/each}
         </div>
 
-        <!-- v2.2 批量栏 -->
-        <div class="bulk-bar">
-          <button class="bulk btn-approve" onclick={bulkApproveCleaning} title="全部显式接受(等同默认,锁定决策)">✓ 全接受</button>
-          <button class="bulk btn-reject" onclick={bulkRejectCleaning} title="全部拒绝(对应行不再删除)">✗ 全拒绝</button>
-          <button class="bulk btn-reset" onclick={bulkClearCleaning}>重置</button>
+        <div class="flex gap-1">
+          <Button variant="outline" size="sm" class="h-7 border-emerald-500/30 text-[10px] text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-400" onclick={bulkApproveCleaning}>✓ 全接受</Button>
+          <Button variant="outline" size="sm" class="h-7 border-red-500/30 text-[10px] text-red-700 hover:bg-red-500/10 dark:text-red-400" onclick={bulkRejectCleaning}>✗ 全拒绝</Button>
+          <Button variant="outline" size="sm" class="h-7 text-[10px]" onclick={bulkClearCleaning}>重置</Button>
         </div>
 
-        <ul class="list">
+        <ul class="m-0 flex list-none flex-col gap-0.5 p-0">
           {#each cleaningItems.slice(0, cleaningVisible) as c, idx (idx)}
             {@const p = preview(c.span)}
             {@const d = getCleaningDecision(c.span)}
             <li>
               <div
-                class="item item-cleaning has-decision-actions"
-                class:active={idx === cleaningSelected}
-                class:dec-approved={d === "approved"}
-                class:dec-rejected={d === "rejected"}
+                class={cn(
+                  "grid grid-cols-[auto_1fr_auto_auto] select-none items-center gap-1.5 rounded border bg-card px-1.5 py-1 text-[11px] cursor-pointer transition-colors hover:bg-accent/60",
+                  idx === cleaningSelected && "border-red-300 bg-red-500/5",
+                  d === "approved" && "shadow-[inset_3px_0_0_oklch(0.7_0.17_148)]",
+                  d === "rejected" && "shadow-[inset_3px_0_0_var(--muted-foreground)] opacity-55",
+                )}
                 role="button"
                 tabindex="0"
                 onclick={() => jumpCleaning(idx)}
                 onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); jumpCleaning(idx); }}}
               >
-                <span class="kind kind-cleaning">{KIND_LABEL[c.kind] ?? c.kind}</span>
-                <span class="ctx">
-                  <span class="dim">{p.before}</span><mark class="mk-cleaning">{p.target}</mark><span class="dim">{p.after}</span>
+                <span class="whitespace-nowrap rounded bg-red-500/15 px-1.5 py-0.5 text-[9px] text-red-700 dark:text-red-300">
+                  {KIND_LABEL[c.kind] ?? c.kind}
                 </span>
-                <span class="offset">[{c.span.start}–{c.span.end}]</span>
-                <span class="dec-actions" role="presentation" onclick={(e) => e.stopPropagation()}>
+                <span class="min-w-0 truncate font-sans">
+                  <span class="text-muted-foreground/60">{p.before}</span><mark class="bg-red-500/40 px-0.5 text-inherit rounded-sm">{p.target}</mark><span class="text-muted-foreground/60">{p.after}</span>
+                </span>
+                <span class="font-mono text-[9px] text-muted-foreground/70">[{c.span.start}–{c.span.end}]</span>
+                <span class="inline-flex gap-0.5" role="presentation" onclick={(e) => e.stopPropagation()}>
                   <button
-                    class="dec-btn dec-approve"
-                    class:on={d === "approved"}
-                    onclick={() => toggleCleaningDecision(c.span, "approved")}
-                    title="确认要删除(显式锁定,= 默认)"
                     type="button"
+                    class={cn(
+                      "size-[18px] rounded border text-[11px] font-bold leading-none transition-colors",
+                      d === "approved"
+                        ? "border-emerald-600 bg-emerald-600 text-white"
+                        : "border-input bg-background text-muted-foreground hover:bg-accent",
+                    )}
+                    onclick={() => toggleCleaningDecision(c.span, "approved")}
+                    title="确认要删除(显式锁定)"
                   >✓</button>
                   <button
-                    class="dec-btn dec-reject"
-                    class:on={d === "rejected"}
+                    type="button"
+                    class={cn(
+                      "size-[18px] rounded border text-[11px] font-bold leading-none transition-colors",
+                      d === "rejected"
+                        ? "border-red-600 bg-red-600 text-white"
+                        : "border-input bg-background text-muted-foreground hover:bg-accent",
+                    )}
                     onclick={() => toggleCleaningDecision(c.span, "rejected")}
                     title="拒绝删除,保留该 span"
-                    type="button"
                   >✗</button>
                 </span>
               </div>
@@ -567,111 +559,147 @@
         </ul>
 
         {#if cleaningVisible < cleaningItems.length}
-          <button class="load-more" onclick={loadMoreCleaning}>
+          <Button variant="outline" size="sm" class="w-full border-dashed text-[11px]" onclick={loadMoreCleaning}>
             再加载 {Math.min(CLEAN_PAGE, cleaningItems.length - cleaningVisible)} 条
             (已显示 {cleaningVisible} / {cleaningItems.length})
-          </button>
+          </Button>
         {/if}
       {/if}
     </section>
 
-    <!-- ============ 下半屏:水印(橙/黄)============ -->
-    <section class="block">
-      <h3>
-        <span class="dot dot-orange"></span><span class="dot dot-yellow"></span>
-        水印检测 <span class="count">auto {wmCounts.auto} · suspect {wmCounts.suspect}</span>
+    <!-- ============ 水印 ============ -->
+    <section class="flex flex-col gap-2 border-t border-dashed pt-3">
+      <h3 class="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <span class="inline-block size-2 rounded-full bg-orange-500/85"></span>
+        <span class="inline-block size-2 rounded-full bg-yellow-400"></span>
+        水印检测
+        <span class="ml-auto text-[10px] font-normal normal-case text-muted-foreground/80">
+          auto {wmCounts.auto} · suspect {wmCounts.suspect}
+        </span>
       </h3>
 
       {#if wmCounts.total === 0}
-        <p class="hint">未识别出水印 —— 整本文本干净或规则未覆盖到。</p>
+        <p class="text-xs text-muted-foreground">未识别出水印 —— 整本文本干净或规则未覆盖到。</p>
       {:else}
-        <div class="tabs" role="tablist">
-          <button class="tab" class:on={wmTab === "all"} onclick={() => (wmTab = "all")}>
-            全部 <small>{wmCounts.total}</small>
-          </button>
-          <button class="tab" class:on={wmTab === "auto"} onclick={() => (wmTab = "auto")}>
-            <span class="dot dot-orange"></span>自动 <small>{wmCounts.auto}</small>
-          </button>
-          <button class="tab" class:on={wmTab === "suspect"} onclick={() => (wmTab = "suspect")}>
-            <span class="dot dot-yellow"></span>灰区 <small>{wmCounts.suspect}</small>
-          </button>
+        <div class="flex flex-wrap gap-1" role="tablist">
+          <button
+            type="button"
+            class={cn(
+              "flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px]",
+              wmTab === "all" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background text-muted-foreground hover:bg-accent",
+            )}
+            onclick={() => (wmTab = "all")}
+          >全部 <small class="opacity-75">{wmCounts.total}</small></button>
+          <button
+            type="button"
+            class={cn(
+              "flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px]",
+              wmTab === "auto" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background text-muted-foreground hover:bg-accent",
+            )}
+            onclick={() => (wmTab = "auto")}
+          ><span class="size-1.5 rounded-full bg-orange-500"></span>自动 <small class="opacity-75">{wmCounts.auto}</small></button>
+          <button
+            type="button"
+            class={cn(
+              "flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px]",
+              wmTab === "suspect" ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background text-muted-foreground hover:bg-accent",
+            )}
+            onclick={() => (wmTab = "suspect")}
+          ><span class="size-1.5 rounded-full bg-yellow-400"></span>灰区 <small class="opacity-75">{wmCounts.suspect}</small></button>
           {#if llm.configured && wmCounts.suspect > 0}
             <button
-              class="tab adj-batch"
+              type="button"
+              class="ml-auto flex items-center gap-1 rounded-full border border-violet-500/30 bg-violet-500/15 px-2.5 py-0.5 text-[10px] text-violet-700 hover:bg-violet-500/25 disabled:opacity-55 dark:text-violet-300"
               disabled={adjudicating}
               onclick={onAdjudicateAll}
               title="把所有灰区候选批量发给 LLM 仲裁"
-              type="button"
             >{adjudicating ? "仲裁中…" : "询问 LLM ▸"}</button>
           {/if}
         </div>
-        {#if adjudicateError}<p class="err adj-err">{adjudicateError}</p>{/if}
+        {#if adjudicateError}
+          <p class="text-[10px] text-destructive">{adjudicateError}</p>
+        {/if}
 
         {#if wmFiltered.length === 0}
-          <p class="hint">当前 tab 下无数据。</p>
+          <p class="text-xs text-muted-foreground">当前 tab 下无数据。</p>
         {:else}
-          <!-- v2.2 批量栏 -->
-          <div class="bulk-bar">
-            <button class="bulk btn-approve" onclick={bulkApproveWm} title="auto 锁定删 / suspect 升级删">✓ 全接受</button>
-            <button class="bulk btn-reject" onclick={bulkRejectWm} title="auto 取消删 / suspect 锁定保留">✗ 全拒绝</button>
-            <button class="bulk btn-reset" onclick={bulkClearWm}>重置</button>
+          <div class="flex gap-1">
+            <Button variant="outline" size="sm" class="h-7 border-emerald-500/30 text-[10px] text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-400" onclick={bulkApproveWm}>✓ 全接受</Button>
+            <Button variant="outline" size="sm" class="h-7 border-red-500/30 text-[10px] text-red-700 hover:bg-red-500/10 dark:text-red-400" onclick={bulkRejectWm}>✗ 全拒绝</Button>
+            <Button variant="outline" size="sm" class="h-7 text-[10px]" onclick={bulkClearWm}>重置</Button>
           </div>
 
-          <ul class="list">
+          <ul class="m-0 flex list-none flex-col gap-0.5 p-0">
             {#each wmFiltered.slice(0, wmVisible) as w, idx (`${w.span.start}-${w.span.end}-${idx}`)}
               {@const p = preview(w.span)}
               {@const d = getWmDecision(w.span)}
               <li>
                 <div
-                  class="item item-watermark has-decision-actions"
-                  class:active={idx === wmSelected}
-                  class:dec-approved={d === "approved"}
-                  class:dec-rejected={d === "rejected"}
+                  class={cn(
+                    "flex select-none cursor-pointer flex-col gap-1 rounded border bg-card p-1.5 text-[11px] transition-colors hover:bg-accent/60",
+                    idx === wmSelected && "border-amber-300 bg-amber-500/5",
+                    d === "approved" && "shadow-[inset_3px_0_0_oklch(0.7_0.17_148)]",
+                    d === "rejected" && "shadow-[inset_3px_0_0_var(--muted-foreground)] opacity-55",
+                  )}
                   role="button"
                   tabindex="0"
                   onclick={() => jumpWm(idx)}
                   onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); jumpWm(idx); }}}
                 >
-                  <span class="verdict-row">
-                    <span class="verdict verdict-{w.verdict}">{w.verdict === "auto" ? "自动" : "灰区"}</span>
-                    <span class="score">分 {formatScore(w.score)}</span>
-                    <span class="offset">[{w.span.start}–{w.span.end}]</span>
-                    <span class="dec-actions" role="presentation" onclick={(e) => e.stopPropagation()}>
+                  <div class="flex items-center gap-1.5">
+                    <span class={cn(
+                      "rounded-full px-1.5 py-0.5 text-[9px] font-semibold",
+                      w.verdict === "auto" ? "bg-orange-500/20 text-orange-700 dark:text-orange-300" : "bg-yellow-400/25 text-yellow-700 dark:text-yellow-300",
+                    )}>
+                      {w.verdict === "auto" ? "自动" : "灰区"}
+                    </span>
+                    <span class="font-mono text-[9px] text-muted-foreground">分 {formatScore(w.score)}</span>
+                    <span class="font-mono text-[9px] text-muted-foreground/70">[{w.span.start}–{w.span.end}]</span>
+                    <span class="ml-auto inline-flex gap-0.5" role="presentation" onclick={(e) => e.stopPropagation()}>
                       {#if llm.configured && w.verdict === "suspect"}
                         {@const spanKey = `${w.span.start}-${w.span.end}`}
                         <button
-                          class="dec-btn adj-one"
+                          type="button"
+                          class="size-[18px] rounded border border-violet-500/30 bg-background text-[10px] font-bold leading-none text-violet-700 hover:bg-violet-500/15 disabled:opacity-55 dark:text-violet-300"
                           disabled={adjudicatingSpan === spanKey || adjudicating}
                           onclick={() => onAdjudicateOne(w.span)}
                           title="询问 LLM 判断这行是否为水印"
-                          type="button"
                         >{adjudicatingSpan === spanKey ? "…" : "?"}</button>
                       {/if}
                       <button
-                        class="dec-btn dec-approve"
-                        class:on={d === "approved"}
+                        type="button"
+                        class={cn(
+                          "size-[18px] rounded border text-[11px] font-bold leading-none transition-colors",
+                          d === "approved" ? "border-emerald-600 bg-emerald-600 text-white" : "border-input bg-background text-muted-foreground hover:bg-accent",
+                        )}
                         onclick={() => toggleWmDecision(w.span, "approved")}
                         title={w.verdict === "auto" ? "确认删(锁定默认)" : "升级:从灰区扣除该行"}
-                        type="button"
                       >✓</button>
                       <button
-                        class="dec-btn dec-reject"
-                        class:on={d === "rejected"}
+                        type="button"
+                        class={cn(
+                          "size-[18px] rounded border text-[11px] font-bold leading-none transition-colors",
+                          d === "rejected" ? "border-red-600 bg-red-600 text-white" : "border-input bg-background text-muted-foreground hover:bg-accent",
+                        )}
                         onclick={() => toggleWmDecision(w.span, "rejected")}
                         title={w.verdict === "auto" ? "拒绝删:auto 行将保留在 EPUB" : "锁定保留(默认就是保留)"}
-                        type="button"
                       >✗</button>
                     </span>
+                  </div>
+                  <span class="overflow-hidden truncate font-sans text-[11px]">
+                    <span class="text-muted-foreground/60">{p.before}</span><mark class={cn(
+                      "px-0.5 text-inherit rounded-sm",
+                      w.verdict === "auto" ? "bg-orange-500/40" : "bg-yellow-400/50",
+                    )}>{p.target}</mark><span class="text-muted-foreground/60">{p.after}</span>
                   </span>
-                  <span class="ctx">
-                    <span class="dim">{p.before}</span><mark class="mk-{w.verdict}">{p.target}</mark><span class="dim">{p.after}</span>
-                  </span>
-                  <div class="signals">
+                  <div class="flex flex-col gap-0.5">
                     {#each w.signals as s}
-                      <div class="signal">
-                        <span class="sig-kind">{SIGNAL_LABEL[s.kind] ?? s.kind}</span>
-                        <span class="sig-bar"><span class="sig-fill" style="width:{Math.round(s.score * 100)}%"></span></span>
-                        {#if s.detail}<span class="sig-detail" title={s.detail}>{s.detail}</span>{/if}
+                      <div class="grid grid-cols-[40px_60px_1fr] items-center gap-1.5 text-[9px] text-muted-foreground">
+                        <span class="font-semibold text-foreground">{SIGNAL_LABEL[s.kind] ?? s.kind}</span>
+                        <span class="inline-block h-1 overflow-hidden rounded-sm bg-muted">
+                          <span class="block h-full bg-orange-500/70" style="width:{Math.round(s.score * 100)}%"></span>
+                        </span>
+                        {#if s.detail}<span class="truncate" title={s.detail}>{s.detail}</span>{/if}
                       </div>
                     {/each}
                   </div>
@@ -681,47 +709,54 @@
           </ul>
 
           {#if wmVisible < wmFiltered.length}
-            <button class="load-more" onclick={loadMoreWm}>
+            <Button variant="outline" size="sm" class="w-full border-dashed text-[11px]" onclick={loadMoreWm}>
               再加载 {Math.min(WM_PAGE, wmFiltered.length - wmVisible)} 条
               (已显示 {wmVisible} / {wmFiltered.length})
-            </button>
+            </Button>
           {/if}
         {/if}
 
-        <!-- 4.8 规则归纳 -->
         {#if llm.configured}
-          <div class="induce-bar">
-            <button
-              class="induce-btn"
+          <div class="mt-2 flex items-center gap-2 border-t border-dashed pt-2">
+            <Button
+              size="sm"
+              variant="outline"
+              class="border-violet-500/30 bg-violet-500/10 text-[10px] text-violet-700 hover:bg-violet-500/20 dark:text-violet-300"
               disabled={rejectedWmCount === 0 || inducing}
               onclick={onInduceRule}
               title={rejectedWmCount === 0 ? "先拒绝(✗)一些灰区候选行" : `从 ${rejectedWmCount} 条拒绝行归纳规则`}
-              type="button"
-            >{inducing ? "归纳中…" : `归纳规则 ▸`}
-              {#if rejectedWmCount > 0}<small>({rejectedWmCount} 条)</small>{/if}
-            </button>
-            {#if induceError}<span class="err">{induceError}</span>{/if}
+            >
+              {inducing ? "归纳中…" : "归纳规则 ▸"}
+              {#if rejectedWmCount > 0}<small class="text-violet-500">({rejectedWmCount} 条)</small>{/if}
+            </Button>
+            {#if induceError}<span class="text-[10px] text-destructive">{induceError}</span>{/if}
           </div>
 
           {#if inducedRule}
-            <div class="rule-preview">
-              <div class="rule-header">
-                <span class="rule-label">LLM 归纳规则</span>
-                <button class="rule-dismiss" onclick={() => { inducedRule = null; savedMsg = ""; }} type="button">✕</button>
+            <div class="mt-2 rounded-md border border-violet-500/30 bg-violet-500/5 p-2 text-[11px]">
+              <div class="mb-1.5 flex items-center justify-between">
+                <span class="text-[10px] font-semibold uppercase tracking-wide text-violet-700 dark:text-violet-300">LLM 归纳规则</span>
+                <button
+                  type="button"
+                  class="text-muted-foreground hover:text-foreground"
+                  onclick={() => { inducedRule = null; savedMsg = ""; }}
+                ><X class="size-3" /></button>
               </div>
-              <div class="rule-pattern">{inducedRule.pattern}</div>
+              <div class="mb-1 break-all rounded border bg-background px-1.5 py-1 font-mono text-[10px]">
+                {inducedRule.pattern}
+              </div>
               {#if inducedRule.description}
-                <div class="rule-desc">{inducedRule.description}</div>
+                <div class="mb-1.5 text-[10px] text-muted-foreground">{inducedRule.description}</div>
               {/if}
               {#if savedMsg}
-                <div class="rule-saved">{savedMsg}</div>
+                <div class="text-[10px] text-emerald-700 dark:text-emerald-400">{savedMsg}</div>
               {:else}
-                <button
-                  class="rule-save-btn"
+                <Button
+                  size="sm"
+                  class="bg-violet-600 text-[10px] text-white hover:bg-violet-700"
                   disabled={savingRule}
                   onclick={onSaveRule}
-                  type="button"
-                >{savingRule ? "保存中…" : "保存规则"}</button>
+                >{savingRule ? "保存中…" : "保存规则"}</Button>
               {/if}
             </div>
           {/if}
@@ -730,444 +765,3 @@
     </section>
   {/if}
 </div>
-
-<style>
-  .panel { padding: 12px 14px; }
-  h2 { font-size: 14px; margin: 0 0 10px 0; }
-  h3 {
-    font-size: 11px;
-    margin: 0 0 6px 0;
-    color: #52606d;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-  h3 .count { font-size: 10px; color: #9aa5b1; margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: normal; }
-  .hint { font-size: 12px; color: #52606d; }
-
-  .block { margin-bottom: 18px; }
-  .block + .block { padding-top: 14px; border-top: 1px dashed #cbd2d9; }
-
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
-  .dot-red    { background: rgba(220, 53, 69, 0.85); }
-  .dot-orange { background: rgba(255, 140, 0, 0.85); }
-  .dot-yellow { background: rgba(245, 196, 0, 0.95); }
-
-  .kinds { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
-  .chip {
-    background: #fff;
-    border: 1px solid #cbd2d9;
-    border-radius: 10px;
-    padding: 2px 8px;
-    font-size: 10px;
-    color: #52606d;
-  }
-  .chip-red strong { color: #c62828; margin-left: 2px; }
-
-  .list { list-style: none; padding: 0; margin: 0; }
-  .list li { margin-bottom: 1px; }
-
-  .item {
-    display: grid;
-    width: 100%;
-    text-align: left;
-    background: #fff;
-    border: 1px solid transparent;
-    border-radius: 3px;
-    padding: 4px 6px;
-    font-size: 11px;
-    cursor: pointer;
-    color: #1f2933;
-  }
-  .item-cleaning {
-    grid-template-columns: auto 1fr auto;
-    gap: 6px;
-    align-items: center;
-  }
-  .item-cleaning.active { background: #fff4f5; border-color: #ef9a9a; }
-  .item-watermark {
-    grid-template-rows: auto auto auto;
-    gap: 3px;
-    padding: 6px 8px;
-  }
-  .item-watermark.active { background: #fff8ee; border-color: #ffb84d; }
-  .item:hover { background: #eef1f5; }
-  .item-watermark.active:hover { background: #fff4e1; }
-
-  .kind {
-    padding: 1px 5px;
-    border-radius: 2px;
-    font-size: 9px;
-    white-space: nowrap;
-  }
-  .kind-cleaning { background: #ffebee; color: #c62828; }
-
-  .verdict-row { display: flex; gap: 6px; align-items: center; }
-  .verdict {
-    padding: 1px 6px;
-    border-radius: 8px;
-    font-size: 9px;
-    font-weight: 600;
-  }
-  .verdict-auto    { background: #fff0d6; color: #b45309; }
-  .verdict-suspect { background: #fff8d6; color: #8a6d00; }
-  .score {
-    font-family: Consolas, monospace;
-    font-size: 9px;
-    color: #52606d;
-  }
-
-  .ctx {
-    font-family: "PingFang SC", "Microsoft YaHei", serif;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-  }
-  .ctx .dim { color: #9aa5b1; }
-  .ctx mark { color: #1f2933; padding: 0 1px; border-radius: 2px; }
-  .mk-cleaning { background: rgba(220, 53, 69, 0.4); }
-  .mk-auto     { background: rgba(255, 140, 0, 0.4); }
-  .mk-suspect  { background: rgba(245, 196, 0, 0.5); }
-
-  .offset {
-    font-family: Consolas, monospace;
-    font-size: 9px;
-    color: #9aa5b1;
-    margin-left: auto;
-  }
-
-  .signals { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; }
-  .signal {
-    display: grid;
-    grid-template-columns: 40px 60px 1fr;
-    gap: 6px;
-    align-items: center;
-    font-size: 9px;
-    color: #52606d;
-  }
-  .sig-kind { font-weight: 600; color: #1f2933; }
-  .sig-bar {
-    display: inline-block;
-    height: 4px;
-    background: #e6e9ee;
-    border-radius: 2px;
-    overflow: hidden;
-  }
-  .sig-fill {
-    display: block;
-    height: 100%;
-    background: rgba(255, 140, 0, 0.7);
-  }
-  .sig-detail {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .tabs {
-    display: flex;
-    gap: 4px;
-    margin-bottom: 8px;
-  }
-  .tab {
-    background: #fff;
-    border: 1px solid #cbd2d9;
-    border-radius: 12px;
-    padding: 3px 10px;
-    font-size: 10px;
-    color: #52606d;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .tab small { color: #9aa5b1; font-size: 9px; }
-  .tab.on { background: #1f6feb; color: #fff; border-color: #1f6feb; }
-  .tab.on small { color: rgba(255, 255, 255, 0.75); }
-
-  .load-more {
-    margin-top: 8px;
-    width: 100%;
-    padding: 4px;
-    font-size: 11px;
-    background: #fff;
-    border: 1px dashed #cbd2d9;
-    color: #52606d;
-    cursor: pointer;
-    border-radius: 3px;
-  }
-  .load-more:hover { background: #eef1f5; }
-
-  /* v2 策略折叠面板 */
-  .strategy {
-    margin-bottom: 14px;
-    background: #fff;
-    border: 1px solid #cbd2d9;
-    border-radius: 4px;
-    overflow: hidden;
-  }
-  .strategy-header {
-    width: 100%;
-    background: #eef1f5;
-    border: none;
-    text-align: left;
-    padding: 6px 10px;
-    font-size: 11px;
-    color: #1f2933;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .strategy-header:hover { background: #e3e8ee; }
-  .strategy-header .caret { font-size: 9px; color: #52606d; }
-  .strategy-header .muted { color: #9aa5b1; font-size: 10px; margin-left: auto; }
-  .strategy-header .dirty-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: #f59e0b;
-    box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.25);
-  }
-  .strategy-body {
-    padding: 8px 10px 6px 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .strat-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 11px;
-    color: #1f2933;
-    cursor: pointer;
-  }
-  .strat-row input { margin: 0; }
-  .strat-row.strat-numeric {
-    cursor: default;
-    display: grid;
-    grid-template-columns: 100px 1fr 44px;
-    gap: 6px;
-    align-items: center;
-  }
-  .strat-row.strat-numeric .strat-hint {
-    grid-column: 1 / -1;
-    padding-left: 100px;
-    margin-top: -2px;
-  }
-  .strat-row.strat-numeric input[type="range"] {
-    width: 100%;
-    margin: 0;
-  }
-  .strat-value {
-    font-family: Consolas, monospace;
-    font-size: 10px;
-    color: #1f2933;
-    text-align: right;
-  }
-  .strat-label { min-width: 90px; }
-  .strat-hint { color: #9aa5b1; font-size: 10px; }
-  .reanalyze-bar {
-    margin: 6px 0 14px 0;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .reanalyze {
-    background: #fff;
-    border: 1px solid #cbd2d9;
-    color: #9aa5b1;
-    padding: 4px 12px;
-    font-size: 11px;
-    border-radius: 3px;
-    cursor: not-allowed;
-  }
-  .reanalyze.hot {
-    background: #1f6feb;
-    border-color: #1f6feb;
-    color: #fff;
-    cursor: pointer;
-  }
-  .reanalyze.hot:hover { background: #1858c2; }
-  .reanalyze:disabled { cursor: not-allowed; opacity: 0.7; }
-  .err { color: #c62828; font-size: 10px; }
-
-  /* v2.2 批量栏 + 决策按钮 */
-  .bulk-bar {
-    display: flex;
-    gap: 4px;
-    margin-bottom: 8px;
-  }
-  .bulk {
-    background: #fff;
-    border: 1px solid #cbd2d9;
-    border-radius: 3px;
-    padding: 2px 8px;
-    font-size: 10px;
-    color: #52606d;
-    cursor: pointer;
-  }
-  .bulk:hover { background: #eef1f5; }
-  .bulk.btn-approve { color: #2e7d32; border-color: #c8e6c9; }
-  .bulk.btn-approve:hover { background: #e8f5e9; }
-  .bulk.btn-reject { color: #c62828; border-color: #ffcdd2; }
-  .bulk.btn-reject:hover { background: #ffebee; }
-
-  /* 卡片决策态:左侧色带 + 整体透明度 */
-  .item.dec-approved {
-    box-shadow: inset 3px 0 0 #43a047;
-  }
-  .item.dec-rejected {
-    box-shadow: inset 3px 0 0 #9aa5b1;
-    opacity: 0.55;
-  }
-
-  /* 决策按钮组 */
-  .dec-actions {
-    display: inline-flex;
-    gap: 2px;
-    margin-left: 4px;
-  }
-  .item-watermark .dec-actions {
-    margin-left: auto;
-  }
-  .dec-btn {
-    background: #fff;
-    border: 1px solid #cbd2d9;
-    border-radius: 3px;
-    width: 20px;
-    height: 18px;
-    padding: 0;
-    font-size: 11px;
-    line-height: 1;
-    cursor: pointer;
-    color: #9aa5b1;
-    font-weight: 700;
-  }
-  .dec-btn:hover { background: #eef1f5; }
-  .dec-btn.dec-approve.on {
-    background: #43a047;
-    border-color: #43a047;
-    color: #fff;
-  }
-  .dec-btn.dec-reject.on {
-    background: #c62828;
-    border-color: #c62828;
-    color: #fff;
-  }
-  /* 让支持决策的"卡片 div"看起来仍像可点按钮 */
-  .item.has-decision-actions { user-select: none; }
-
-  /* 4.7 LLM 仲裁按钮 */
-  .tab.adj-batch {
-    margin-left: auto;
-    background: #ede9fe;
-    border-color: #c4b5fd;
-    color: #6d28d9;
-  }
-  .tab.adj-batch:hover:not(:disabled) { background: #ddd6fe; }
-  .tab.adj-batch:disabled { opacity: 0.55; cursor: not-allowed; }
-
-  .dec-btn.adj-one {
-    color: #6d28d9;
-    border-color: #c4b5fd;
-    font-size: 10px;
-    width: 18px;
-  }
-  .dec-btn.adj-one:hover:not(:disabled) { background: #ede9fe; }
-  .dec-btn.adj-one:disabled { opacity: 0.55; cursor: not-allowed; }
-
-  .adj-err { margin: 4px 0 0 0; font-size: 10px; }
-
-  /* 4.8 规则归纳 */
-  .induce-bar {
-    margin-top: 12px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    border-top: 1px dashed #cbd2d9;
-    padding-top: 8px;
-  }
-  .induce-btn {
-    background: #f5f0ff;
-    border: 1px solid #c4b5fd;
-    border-radius: 3px;
-    padding: 3px 10px;
-    font-size: 10px;
-    color: #6d28d9;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .induce-btn:hover:not(:disabled) { background: #ede9fe; }
-  .induce-btn:disabled { opacity: 0.55; cursor: not-allowed; }
-  .induce-btn small { color: #8b5cf6; font-size: 9px; }
-
-  .rule-preview {
-    margin-top: 8px;
-    background: #faf5ff;
-    border: 1px solid #c4b5fd;
-    border-radius: 4px;
-    padding: 8px 10px;
-    font-size: 11px;
-  }
-  .rule-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 6px;
-  }
-  .rule-label {
-    font-size: 10px;
-    font-weight: 600;
-    color: #6d28d9;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-  }
-  .rule-dismiss {
-    background: none;
-    border: none;
-    color: #9aa5b1;
-    cursor: pointer;
-    padding: 0;
-    font-size: 12px;
-    line-height: 1;
-  }
-  .rule-dismiss:hover { color: #52606d; }
-  .rule-pattern {
-    font-family: Consolas, monospace;
-    font-size: 10px;
-    background: #fff;
-    border: 1px solid #e4d9fc;
-    border-radius: 3px;
-    padding: 4px 6px;
-    word-break: break-all;
-    color: #1f2933;
-    margin-bottom: 4px;
-  }
-  .rule-desc {
-    font-size: 10px;
-    color: #52606d;
-    margin-bottom: 6px;
-  }
-  .rule-save-btn {
-    background: #6d28d9;
-    border: none;
-    border-radius: 3px;
-    padding: 3px 10px;
-    font-size: 10px;
-    color: #fff;
-    cursor: pointer;
-  }
-  .rule-save-btn:hover:not(:disabled) { background: #5b21b6; }
-  .rule-save-btn:disabled { opacity: 0.55; cursor: not-allowed; }
-  .rule-saved {
-    font-size: 10px;
-    color: #2e7d32;
-  }
-</style>

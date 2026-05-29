@@ -1,10 +1,17 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
+import tailwindcss from "@tailwindcss/vite";
+import path from "node:path";
 
 // Tauri 会通过 beforeDevCommand 启动这里的 dev server,通过 frontendDist 取
 // build 产物。详见 `docs/stage2-design.md` 第一节与 `tauri.conf.json`。
 export default defineConfig({
-  plugins: [svelte()],
+  plugins: [tailwindcss(), svelte()],
+  resolve: {
+    alias: {
+      $lib: path.resolve(__dirname, "src/lib"),
+    },
+  },
   // 在 Tauri 中通过 file:// 加载产物,base 必须是相对路径。
   base: "./",
   build: {

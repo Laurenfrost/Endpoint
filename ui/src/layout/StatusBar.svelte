@@ -6,125 +6,48 @@
   import { progress, stageLabel } from "../stores/progress.svelte.js";
 </script>
 
-<footer class="status-bar" aria-label="状态栏">
-  <div class="left">
-    <span class="brand">Endpoint</span>
+<footer
+  class="flex h-6 shrink-0 select-none items-center gap-3.5 border-t bg-statusbar px-2.5 text-[11px] text-statusbar-foreground"
+  aria-label="状态栏"
+>
+  <div class="flex min-w-0 items-center gap-2">
+    <span class="font-semibold tracking-wide">Endpoint</span>
     {#if pipeline.dto}
-      <span class="sep">·</span>
-      <span class="item" title="编码">
-        <span class="dot enc"></span>{pipeline.dto.source_encoding}
+      <span class="opacity-40">·</span>
+      <span class="inline-flex items-center gap-1 whitespace-nowrap" title="编码">
+        <span class="inline-block size-1.5 rounded-full bg-current opacity-85"></span>
+        {pipeline.dto.source_encoding}
       </span>
-      <span class="item" title="字符数">
+      <span class="whitespace-nowrap" title="字符数">
         {pipeline.dto.source_text.length.toLocaleString()} 字符
       </span>
-      <span class="item" title="清洗标注">
+      <span class="whitespace-nowrap" title="清洗标注">
         {pipeline.dto.cleaning.length} 清洗
       </span>
-      <span class="item" title="顶层条目">
+      <span class="whitespace-nowrap" title="顶层条目">
         {pipeline.dto.book.entries.length} 条目
       </span>
     {:else}
-      <span class="sep">·</span>
-      <span class="item idle">未加载文件</span>
+      <span class="opacity-40">·</span>
+      <span class="italic opacity-75">未加载文件</span>
     {/if}
   </div>
 
-  <div class="right">
+  <div class="ml-auto flex shrink-0 items-center gap-2">
     {#if progress.stage}
-      <span class="stage">{stageLabel(progress.stage)}</span>
-      <span class="bar" class:busy={progress.busy}>
-        <span class="fill" style="width: {progress.percent}%"></span>
+      <span class="font-medium">{stageLabel(progress.stage)}</span>
+      <span class="inline-block h-1.5 w-[120px] overflow-hidden rounded-full bg-white/25">
+        <span
+          class="block h-full bg-current transition-[width] duration-150"
+          style="width: {progress.percent}%"
+        ></span>
       </span>
-      <span class="pct">{progress.percent}%</span>
+      <span class="min-w-9 text-right font-mono">{progress.percent}%</span>
       {#if progress.detail}
-        <span class="detail" title={progress.detail}>{progress.detail}</span>
+        <span class="max-w-[280px] truncate opacity-85" title={progress.detail}>{progress.detail}</span>
       {/if}
     {:else}
-      <span class="idle">就绪</span>
+      <span class="italic opacity-75">就绪</span>
     {/if}
   </div>
 </footer>
-
-<style>
-  .status-bar {
-    height: 24px;
-    background: #1f6feb;
-    color: #fff;
-    display: flex;
-    align-items: center;
-    padding: 0 10px;
-    gap: 14px;
-    font-size: 11px;
-    flex-shrink: 0;
-    border-top: 1px solid #1858c4;
-    user-select: none;
-  }
-  .left, .right {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-  .right {
-    margin-left: auto;
-    flex-shrink: 0;
-  }
-  .brand {
-    font-weight: 600;
-    letter-spacing: 0.3px;
-  }
-  .sep {
-    color: rgba(255, 255, 255, 0.4);
-  }
-  .item {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    white-space: nowrap;
-  }
-  .item.idle {
-    color: rgba(255, 255, 255, 0.7);
-  }
-  .dot.enc {
-    display: inline-block;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: #fff;
-    opacity: 0.85;
-  }
-  .stage {
-    color: #fff;
-    font-weight: 500;
-  }
-  .bar {
-    display: inline-block;
-    width: 120px;
-    height: 6px;
-    background: rgba(255, 255, 255, 0.25);
-    border-radius: 3px;
-    overflow: hidden;
-  }
-  .fill {
-    display: block;
-    height: 100%;
-    background: #fff;
-    transition: width 120ms ease;
-  }
-  .pct {
-    font-family: Consolas, "Cascadia Mono", monospace;
-    min-width: 36px;
-    text-align: right;
-  }
-  .detail {
-    color: rgba(255, 255, 255, 0.85);
-    max-width: 280px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .idle {
-    color: rgba(255, 255, 255, 0.75);
-    font-style: italic;
-  }
-</style>

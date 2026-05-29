@@ -6,31 +6,14 @@
   import OverviewRuler from "./OverviewRuler.svelte";
 </script>
 
-<section class="text-view">
+<section class="flex min-h-0 flex-1 bg-background">
   {#if !pipeline.dto}
-    <div class="empty">
+    <div class="flex-1 self-center p-10 text-center text-muted-foreground">
       <p>未加载文件。</p>
-      <p class="small">在左侧「文本选择」阶段选择 txt 并加载。</p>
+      <p class="text-xs opacity-70">在左侧「文本选择」阶段选择 txt 并加载。</p>
     </div>
   {:else}
     <VirtualText />
     <OverviewRuler />
   {/if}
 </section>
-
-<style>
-  .text-view {
-    flex: 1;
-    display: flex;
-    min-height: 0;
-    background: #fff;
-  }
-  .empty {
-    flex: 1;
-    color: #52606d;
-    padding: 40px;
-    text-align: center;
-    align-self: center;
-  }
-  .empty .small { font-size: 12px; opacity: 0.7; }
-</style>

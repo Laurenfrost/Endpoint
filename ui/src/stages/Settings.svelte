@@ -1,6 +1,5 @@
 <script>
   // 设置面板:LLM / 搜索后端 / kepubify。
-  // 从 Stage4Export 抽出的全局配置区,与具体导出无关。
   import { progress } from "../stores/progress.svelte.js";
   import { llm, applyLlmConfig } from "../stores/llm.svelte.js";
   import {
@@ -8,26 +7,27 @@
     getLlmConfig, setLlmConfig, setSearchConfig,
     getKepubifyConfig, setKepubifyConfig,
   } from "../ipc.js";
+  import { Button } from "$lib/components/ui/button/index.js";
+  import { Input } from "$lib/components/ui/input/index.js";
+  import { Label } from "$lib/components/ui/label/index.js";
+  import { Checkbox } from "$lib/components/ui/checkbox/index.js";
+  import { cn } from "$lib/utils.js";
 
-  // LLM 配置
   let llmBaseUrl = $state("");
   let llmModel = $state("");
   let llmApiKey = $state("");
   let llmSaving = $state(false);
   let llmMsg = $state("");
 
-  // Brave 搜索配置
   let searchProvider = $state("brave");
   let searchApiKey = $state("");
   let searchSaving = $state(false);
   let searchMsg = $state("");
 
-  // kepubify 配置
   let kepubifyPath = $state("");
   let kepubifyEnabled = $state(false);
   let kepubifyMsg = $state("");
 
-  // 进入时加载持久化配置
   $effect(() => {
     getLlmConfig().then(cfg => {
       applyLlmConfig(cfg);
@@ -133,121 +133,122 @@
   }
 </script>
 
-<div class="panel">
-  <h2>⚙ 设置</h2>
+<div class="flex flex-col gap-4 p-4">
+  <h2 class="text-sm font-semibold">⚙ 设置</h2>
 
   <!-- LLM -->
-  <section class="section">
-    <div class="section-header">
-      <span class="section-title">
+  <section class="flex flex-col gap-2 border-b pb-4">
+    <div class="flex items-center justify-between">
+      <span class="flex items-center gap-1.5 text-xs font-semibold">
         LLM
-        {#if llm.configured}
-          <span class="dot configured" title="已配置"></span>
-        {:else}
-          <span class="dot" title="未配置"></span>
-        {/if}
+        <span class={cn(
+          "inline-block size-1.5 rounded-full",
+          llm.configured ? "bg-emerald-500" : "bg-muted-foreground/50",
+        )}></span>
       </span>
     </div>
-    <p class="hint section-explain">
+    <p class="text-[11px] text-muted-foreground">
       用于水印仲裁、规则归纳、元数据建议。未配置时所有 LLM 功能静默跳过,不影响其他流程。
     </p>
-    <label>
-      <span>API 接口地址 base_url <em class="required">必填</em></span>
-      <input type="text" bind:value={llmBaseUrl}
-        placeholder="例如:https://api.deepseek.com"
-        disabled={llmSaving} />
-      <span class="field-hint">OpenAI 兼容的 chat completions 服务都可以(DeepSeek / 本地 Ollama / OpenAI 等)。</span>
-    </label>
-    <label>
-      <span>模型 <em class="required">必填</em></span>
-      <input type="text" bind:value={llmModel}
-        placeholder="例如:deepseek-chat"
-        disabled={llmSaving} />
-    </label>
-    <label>
-      <span>API Key {llm.configured ? `(当前: ${llm.keyMasked})` : ""}</span>
-      <input type="password" bind:value={llmApiKey}
-        placeholder="留空保持原 key 不变"
-        disabled={llmSaving} />
-    </label>
-    <div class="row right">
-      <button onclick={onSaveLlm} disabled={llmSaving}>
-        {llmSaving ? "保存中..." : "保存 LLM 配置"}
-      </button>
+    <div class="flex flex-col gap-1.5">
+      <Label for="llm-url">
+        API 接口地址 base_url
+        <span class="ml-1 rounded bg-rose-100 px-1 text-[10px] text-rose-700 dark:bg-rose-500/20 dark:text-rose-300">必填</span>
+      </Label>
+      <Input id="llm-url" bind:value={llmBaseUrl}
+        placeholder="例如:https://api.deepseek.com" disabled={llmSaving} />
+      <span class="text-[11px] text-muted-foreground">
+        OpenAI 兼容的 chat completions 服务都可以(DeepSeek / 本地 Ollama / OpenAI 等)。
+      </span>
     </div>
-    {#if llmMsg}<p class="hint">{llmMsg}</p>{/if}
-    <p class="hint storage">
-      API key 明文存储于 <code>%APPDATA%\Endpoint\config.toml</code>,仅限本机使用。
+    <div class="flex flex-col gap-1.5">
+      <Label for="llm-model">
+        模型
+        <span class="ml-1 rounded bg-rose-100 px-1 text-[10px] text-rose-700 dark:bg-rose-500/20 dark:text-rose-300">必填</span>
+      </Label>
+      <Input id="llm-model" bind:value={llmModel}
+        placeholder="例如:deepseek-chat" disabled={llmSaving} />
+    </div>
+    <div class="flex flex-col gap-1.5">
+      <Label for="llm-key">
+        API Key {llm.configured ? `(当前: ${llm.keyMasked})` : ""}
+      </Label>
+      <Input id="llm-key" type="password" bind:value={llmApiKey}
+        placeholder="留空保持原 key 不变" disabled={llmSaving} />
+    </div>
+    <div class="flex justify-end">
+      <Button size="sm" onclick={onSaveLlm} disabled={llmSaving}>
+        {llmSaving ? "保存中…" : "保存 LLM 配置"}
+      </Button>
+    </div>
+    {#if llmMsg}<p class="text-[11px] text-muted-foreground">{llmMsg}</p>{/if}
+    <p class="text-[11px] text-muted-foreground/70">
+      API key 明文存储于 <code class="rounded bg-muted px-1 font-mono text-[10px]">%APPDATA%\Endpoint\config.toml</code>,仅限本机使用。
     </p>
   </section>
 
   <!-- Web 搜索后端 -->
-  <section class="section">
-    <div class="section-header">
-      <span class="section-title">
+  <section class="flex flex-col gap-2 border-b pb-4">
+    <div class="flex items-center justify-between">
+      <span class="flex items-center gap-1.5 text-xs font-semibold">
         Web 搜索后端(可选)
-        {#if llm.searchConfigured}
-          <span class="dot configured" title="搜索已配置"></span>
-        {:else}
-          <span class="dot" title="搜索未配置"></span>
-        {/if}
+        <span class={cn(
+          "inline-block size-1.5 rounded-full",
+          llm.searchConfigured ? "bg-emerald-500" : "bg-muted-foreground/50",
+        )}></span>
       </span>
     </div>
-    <p class="hint section-explain">
+    <p class="text-[11px] text-muted-foreground">
       冷门作品 LLM 训练知识识别不到时,会用搜索结果补全分类/系列/简介。留空 provider 即可禁用搜索。
     </p>
-    <label>
-      <span>Provider</span>
-      <input type="text" bind:value={searchProvider}
-        placeholder="brave(留空 = 禁用搜索)"
-        disabled={searchSaving} />
-      <span class="field-hint">
-        目前仅支持 <code>brave</code>。在
-        <a href="https://brave.com/search/api/" target="_blank">brave.com/search/api</a>
+    <div class="flex flex-col gap-1.5">
+      <Label for="search-provider">Provider</Label>
+      <Input id="search-provider" bind:value={searchProvider}
+        placeholder="brave(留空 = 禁用搜索)" disabled={searchSaving} />
+      <span class="text-[11px] text-muted-foreground">
+        目前仅支持 <code class="rounded bg-muted px-1 font-mono text-[10px]">brave</code>。在
+        <a class="text-primary hover:underline" href="https://brave.com/search/api/" target="_blank" rel="noopener">brave.com/search/api</a>
         注册免费 2000 次/月。
       </span>
-    </label>
-    <label>
-      <span>Brave API Key {llm.searchConfigured ? `(当前: ${llm.searchKeyMasked})` : ""}</span>
-      <input type="password" bind:value={searchApiKey}
-        placeholder="留空保持原 key 不变"
-        disabled={searchSaving} />
-    </label>
-    <div class="row right">
-      <button onclick={onSaveSearch} disabled={searchSaving}>
-        {searchSaving ? "保存中..." : "保存搜索配置"}
-      </button>
     </div>
-    {#if searchMsg}<p class="hint">{searchMsg}</p>{/if}
+    <div class="flex flex-col gap-1.5">
+      <Label for="search-key">
+        Brave API Key {llm.searchConfigured ? `(当前: ${llm.searchKeyMasked})` : ""}
+      </Label>
+      <Input id="search-key" type="password" bind:value={searchApiKey}
+        placeholder="留空保持原 key 不变" disabled={searchSaving} />
+    </div>
+    <div class="flex justify-end">
+      <Button size="sm" onclick={onSaveSearch} disabled={searchSaving}>
+        {searchSaving ? "保存中…" : "保存搜索配置"}
+      </Button>
+    </div>
+    {#if searchMsg}<p class="text-[11px] text-muted-foreground">{searchMsg}</p>{/if}
   </section>
 
   <!-- kepubify -->
-  <section class="section">
-    <div class="section-header">
-      <span class="section-title">kepubify 优化(可选)</span>
-    </div>
-    <p class="hint section-explain">
-      生成 <code>.kepub.epub</code>,Kobo 设备排版/分页体验更好。需要本地 kepubify.exe。
+  <section class="flex flex-col gap-2">
+    <span class="text-xs font-semibold">kepubify 优化(可选)</span>
+    <p class="text-[11px] text-muted-foreground">
+      生成 <code class="rounded bg-muted px-1 font-mono text-[10px]">.kepub.epub</code>,Kobo 设备排版/分页体验更好。需要本地 kepubify.exe。
     </p>
-    <label class="checkbox-label">
-      <input
-        type="checkbox"
+    <label class="flex cursor-pointer items-center gap-2 text-xs">
+      <Checkbox
         bind:checked={kepubifyEnabled}
-        onchange={onToggleKepubifyEnabled}
+        onCheckedChange={onToggleKepubifyEnabled}
         disabled={progress.busy || !kepubifyPath}
       />
-      <span>生成 .kepub.epub</span>
+      生成 .kepub.epub
     </label>
-    <div class="row">
-      <input type="text" value={kepubifyPath} readonly
-        placeholder="未设置 kepubify.exe 路径"
-        disabled={progress.busy} />
-      <button onclick={onPickKepubify} disabled={progress.busy}>选择</button>
+    <div class="flex gap-1.5">
+      <Input value={kepubifyPath} readonly
+        placeholder="未设置 kepubify.exe 路径" disabled={progress.busy} />
+      <Button variant="outline" size="sm" onclick={onPickKepubify} disabled={progress.busy}>选择</Button>
       {#if kepubifyPath}
-        <button onclick={onClearKepubify} disabled={progress.busy} title="清除路径">✕</button>
+        <Button variant="outline" size="sm" onclick={onClearKepubify} disabled={progress.busy} title="清除路径">✕</Button>
       {/if}
     </div>
-    <p class="hint">
+    <p class="text-[11px] text-muted-foreground">
       {#if !kepubifyPath}
         未配置时只生成标准 .epub。路径设过一次后会自动记住。
       {:else if !kepubifyEnabled}
@@ -256,115 +257,6 @@
         导出时将额外跑 kepubify 生成 .kepub.epub。
       {/if}
     </p>
-    {#if kepubifyMsg}<p class="hint">{kepubifyMsg}</p>{/if}
+    {#if kepubifyMsg}<p class="text-[11px] text-destructive">{kepubifyMsg}</p>{/if}
   </section>
 </div>
-
-<style>
-  .panel { padding: 16px; }
-  h2 { font-size: 14px; margin: 0 0 14px 0; color: #1f2933; }
-  .section {
-    margin-bottom: 18px;
-    padding-bottom: 14px;
-    border-bottom: 1px solid #e4e7eb;
-  }
-  .section:last-child { border-bottom: none; }
-  .section-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 6px;
-  }
-  .section-title {
-    font-weight: 600;
-    color: #1f2933;
-    font-size: 12px;
-  }
-  .section-explain {
-    margin: 0 0 10px;
-    color: #6b7280;
-    font-size: 11px;
-  }
-  .dot {
-    display: inline-block;
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #cbd2d9;
-    margin-left: 6px;
-    vertical-align: middle;
-  }
-  .dot.configured { background: #2e7d32; }
-  label {
-    display: block;
-    margin-bottom: 8px;
-    font-size: 12px;
-    color: #52606d;
-  }
-  label span { display: block; margin-bottom: 2px; }
-  .checkbox-label {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-bottom: 6px;
-    cursor: pointer;
-    user-select: none;
-  }
-  .checkbox-label input[type=checkbox] { margin: 0; width: auto; }
-  .row { display: flex; gap: 4px; }
-  .row.right { justify-content: flex-end; }
-  .row input { flex: 1; }
-  input[type=text], input[type=password] {
-    width: 100%;
-    padding: 5px 8px;
-    border: 1px solid #cbd2d9;
-    border-radius: 4px;
-    font-size: 12px;
-    background: #fff;
-    color: #1f2933;
-    box-sizing: border-box;
-  }
-  button {
-    padding: 5px 10px;
-    font-size: 12px;
-    border: 1px solid #cbd2d9;
-    background: #fff;
-    border-radius: 4px;
-    cursor: pointer;
-    color: #1f2933;
-    white-space: nowrap;
-  }
-  button:hover:not(:disabled) { background: #eef1f5; }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .hint {
-    font-size: 11px;
-    color: #52606d;
-    margin: 4px 0 0;
-  }
-  .hint.storage { color: #9aa5b1; margin-top: 6px; }
-  .required {
-    display: inline-block;
-    margin-left: 6px;
-    padding: 0 5px;
-    background: #ffe4e6;
-    color: #b42318;
-    border-radius: 3px;
-    font-size: 10px;
-    font-style: normal;
-    vertical-align: middle;
-  }
-  .field-hint {
-    display: block;
-    margin-top: 3px;
-    font-size: 11px;
-    color: #6b7280;
-  }
-  a { color: #1f6feb; }
-  code {
-    background: #eef1f5;
-    padding: 0 4px;
-    border-radius: 3px;
-    font-family: Consolas, "Cascadia Mono", monospace;
-    font-size: 11px;
-  }
-</style>

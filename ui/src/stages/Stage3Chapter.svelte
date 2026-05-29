@@ -1,6 +1,8 @@
 <script>
   // 阶段 3:章节分析 —— 卷-章树 + 蓝色 heading 高亮 + 绿色 volume 高亮 + 跳转。
   // 标尺多层叠加:红(清洗)+ 蓝(章)+ 绿(卷)。
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import { pipeline } from "../stores/pipeline.svelte.js";
   import {
     setLayers,
@@ -8,6 +10,9 @@
     jumpToByteOffset,
   } from "../stores/annotations.svelte.js";
   import { onDestroy } from "svelte";
+  import { Button } from "$lib/components/ui/button/index.js";
+  import { Badge } from "$lib/components/ui/badge/index.js";
+  import { cn } from "$lib/utils.js";
 
   const ORIGIN_LABEL = {
     regex_match: "规则",
@@ -58,24 +63,9 @@
       }
     }
     setLayers([
-      {
-        id: "cleaning",
-        color: "rgba(220, 53, 69, 0.4)",
-        className: "hl-cleaning",
-        items: cleanings,
-      },
-      {
-        id: "heading",
-        color: "rgba(31, 111, 235, 0.75)",
-        className: "hl-heading",
-        items: headings,
-      },
-      {
-        id: "volume",
-        color: "rgba(46, 125, 50, 0.85)",
-        className: "hl-volume",
-        items: volumes,
-      },
+      { id: "cleaning", color: "var(--hl-cleaning)", className: "hl-cleaning", items: cleanings },
+      { id: "heading", color: "var(--hl-heading)", className: "hl-heading", items: headings },
+      { id: "volume", color: "var(--hl-volume)", className: "hl-volume", items: volumes },
     ]);
   });
 
@@ -106,64 +96,80 @@
   });
 </script>
 
-<div class="panel">
-  <h2>3. 章节分析</h2>
+<div class="flex flex-col gap-2 p-3">
+  <h2 class="text-sm font-semibold">3. 章节分析</h2>
 
   {#if !pipeline.dto}
-    <p class="hint">请先在阶段 1 加载文件。</p>
+    <p class="text-xs text-muted-foreground">请先在阶段 1 加载文件。</p>
   {:else}
-    <div class="stats">
-      <span class="chip vol">{stats.vols} 卷</span>
-      <span class="chip ch">{stats.chs} 章</span>
+    <div class="flex flex-wrap gap-1.5">
+      <Badge variant="success">{stats.vols} 卷</Badge>
+      <Badge variant="info">{stats.chs} 章</Badge>
       {#if stats.fallback > 0}
-        <span class="chip fb" title="未由规则命中、由兜底逻辑产生的章">
+        <Badge variant="warning" title="未由规则命中、由兜底逻辑产生的章">
           {stats.fallback} 兜底
-        </span>
+        </Badge>
       {/if}
     </div>
 
-    <div class="toolbar">
-      <button onclick={expandAll}>全展开</button>
-      <button onclick={collapseAll}>全折叠</button>
+    <div class="flex gap-1.5">
+      <Button variant="outline" size="sm" class="h-7 text-[11px]" onclick={expandAll}>全展开</Button>
+      <Button variant="outline" size="sm" class="h-7 text-[11px]" onclick={collapseAll}>全折叠</Button>
     </div>
 
-    <ul class="tree">
+    <ul class="m-0 flex list-none flex-col gap-0.5 p-0">
       {#each entries as e, i (i)}
         {#if e.type === "volume"}
           {@const isFolded = collapsed[i]}
-          <li class="volume">
-            <div class="vol-row">
+          <li>
+            <div class="flex items-center gap-0.5">
               <button
-                class="caret"
+                type="button"
+                class="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent"
                 onclick={() => toggle(i)}
                 aria-label={isFolded ? "展开" : "折叠"}
               >
-                {isFolded ? "▶" : "▼"}
+                {#if isFolded}
+                  <ChevronRight class="size-3.5" />
+                {:else}
+                  <ChevronDown class="size-3.5" />
+                {/if}
               </button>
               <button
-                class="title vol-title"
-                class:active={selectedKey === `v${i}`}
+                type="button"
+                class={cn(
+                  "flex min-w-0 flex-1 items-center gap-1.5 rounded border border-transparent px-1.5 py-1 text-left text-xs font-semibold transition-colors",
+                  "text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10",
+                  selectedKey === `v${i}` && "border-emerald-500 bg-emerald-500/15",
+                )}
                 onclick={() => go(e.heading_span, `v${i}`)}
                 title={`${e.title} · ${e.chapters.length} 章 · ${ORIGIN_LABEL[e.origin] ?? e.origin}`}
               >
-                <span class="text">{e.title}</span>
-                <span class="badge">{e.chapters.length}</span>
+                <span class="min-w-0 flex-1 truncate">{e.title}</span>
+                <span class="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-normal">
+                  {e.chapters.length}
+                </span>
               </button>
             </div>
             {#if !isFolded}
-              <ul class="chapters">
+              <ul class="m-0 ml-4 flex list-none flex-col gap-0.5 p-0">
                 {#each e.chapters as c, j (j)}
                   <li>
                     <button
-                      class="title ch-title"
-                      class:active={selectedKey === `v${i}c${j}`}
-                      class:fallback={c.origin === "fallback"}
+                      type="button"
+                      class={cn(
+                        "flex w-full items-center gap-1.5 rounded border border-transparent px-1.5 py-1 text-left text-xs transition-colors hover:bg-accent",
+                        selectedKey === `v${i}c${j}` && "border-primary bg-primary/10",
+                        c.origin === "fallback" && "text-amber-700 dark:text-amber-400",
+                      )}
                       onclick={() => go(c.heading_span, `v${i}c${j}`)}
                       title={`${c.title} · ${ORIGIN_LABEL[c.origin] ?? c.origin}${c.matched_rule_id ? ` · ${c.matched_rule_id}` : ""}`}
                     >
-                      <span class="text">{c.title}</span>
+                      <span class="min-w-0 flex-1 truncate">{c.title}</span>
                       {#if c.origin !== "regex_match"}
-                        <span class="origin-badge">{ORIGIN_LABEL[c.origin] ?? c.origin}</span>
+                        <span class="rounded bg-amber-500/15 px-1 py-0 text-[9px] text-amber-700 dark:text-amber-300">
+                          {ORIGIN_LABEL[c.origin] ?? c.origin}
+                        </span>
                       {/if}
                     </button>
                   </li>
@@ -172,17 +178,22 @@
             {/if}
           </li>
         {:else}
-          <li class="chapter">
+          <li>
             <button
-              class="title ch-title top"
-              class:active={selectedKey === `c${i}`}
-              class:fallback={e.origin === "fallback"}
+              type="button"
+              class={cn(
+                "flex w-full items-center gap-1.5 rounded border border-transparent px-1.5 py-1 text-left text-xs italic text-muted-foreground transition-colors hover:bg-accent",
+                selectedKey === `c${i}` && "border-primary bg-primary/10",
+                e.origin === "fallback" && "text-amber-700 dark:text-amber-400",
+              )}
               onclick={() => go(e.heading_span, `c${i}`)}
               title={`${e.title} · ${ORIGIN_LABEL[e.origin] ?? e.origin}`}
             >
-              <span class="text">{e.title}</span>
+              <span class="min-w-0 flex-1 truncate">{e.title}</span>
               {#if e.origin !== "regex_match"}
-                <span class="origin-badge">{ORIGIN_LABEL[e.origin] ?? e.origin}</span>
+                <span class="rounded bg-amber-500/15 px-1 py-0 text-[9px] text-amber-700 dark:text-amber-300">
+                  {ORIGIN_LABEL[e.origin] ?? e.origin}
+                </span>
               {/if}
             </button>
           </li>
@@ -191,89 +202,3 @@
     </ul>
   {/if}
 </div>
-
-<style>
-  .panel { padding: 12px 14px; }
-  h2 { font-size: 14px; margin: 0 0 10px 0; }
-  .hint { font-size: 12px; color: #52606d; }
-  .stats { display: flex; gap: 4px; margin-bottom: 8px; }
-  .chip {
-    background: #fff;
-    border: 1px solid #cbd2d9;
-    border-radius: 10px;
-    padding: 2px 8px;
-    font-size: 10px;
-  }
-  .chip.vol { color: #2e7d32; border-color: #a5d6a7; }
-  .chip.ch { color: #1f6feb; border-color: #b3c7e6; }
-  .chip.fb { color: #8a5400; border-color: #f5c074; background: #fff4e5; }
-  .toolbar { display: flex; gap: 4px; margin-bottom: 8px; }
-  .toolbar button {
-    font-size: 10px;
-    padding: 2px 8px;
-    background: #fff;
-    border: 1px solid #cbd2d9;
-    border-radius: 3px;
-    cursor: pointer;
-    color: #52606d;
-  }
-  .toolbar button:hover { background: #eef1f5; }
-  .tree, .chapters {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-  }
-  .chapters { padding-left: 16px; }
-  .vol-row { display: flex; align-items: center; gap: 2px; }
-  .caret {
-    background: transparent;
-    border: none;
-    width: 14px;
-    font-size: 9px;
-    color: #52606d;
-    cursor: pointer;
-    padding: 0;
-  }
-  .title {
-    flex: 1;
-    text-align: left;
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 3px;
-    padding: 3px 6px;
-    font-size: 12px;
-    cursor: pointer;
-    color: #1f2933;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-  }
-  .title:hover { background: #eef1f5; }
-  .title.active { background: #e3eefb; border-color: #1f6feb; }
-  .title .text {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .vol-title { font-weight: 600; color: #2e7d32; }
-  .vol-title.active { background: #e8f5e9; border-color: #2e7d32; }
-  .vol-title .badge {
-    background: #e8f5e9;
-    color: #2e7d32;
-    font-size: 9px;
-    padding: 1px 5px;
-    border-radius: 8px;
-    font-weight: normal;
-  }
-  .ch-title.top { font-style: italic; color: #52606d; }
-  .ch-title.fallback .text { color: #8a5400; }
-  .origin-badge {
-    background: #fff4e5;
-    color: #8a5400;
-    font-size: 9px;
-    padding: 0 4px;
-    border-radius: 2px;
-  }
-</style>

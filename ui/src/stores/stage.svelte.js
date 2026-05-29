@@ -25,9 +25,14 @@ export function toggleSettings() {
   stage.view = stage.view === "settings" ? "stage" : "settings";
 }
 
+import FileText from "@lucide/svelte/icons/file-text";
+import Sparkles from "@lucide/svelte/icons/sparkles";
+import ListTree from "@lucide/svelte/icons/list-tree";
+import Upload from "@lucide/svelte/icons/upload";
+
 export const STAGE_DEFS = [
-  { id: 1, label: "文本选择", icon: "📁" },
-  { id: 2, label: "文本处理", icon: "🧹" },
-  { id: 3, label: "章节分析", icon: "📑" },
-  { id: 4, label: "样式预览与导出", icon: "📤" },
+  { id: 1, label: "文本选择", icon: FileText },
+  { id: 2, label: "文本处理", icon: Sparkles },
+  { id: 3, label: "章节分析", icon: ListTree },
+  { id: 4, label: "样式预览与导出", icon: Upload },
 ];

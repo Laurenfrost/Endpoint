@@ -210,7 +210,7 @@
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
-    background: #fff;
+    background: var(--background);
     position: relative;
   }
   .canvas {
@@ -226,37 +226,46 @@
       "Noto Serif CJK SC", serif;
     font-size: 16px;
     line-height: 1.75;
-    color: #1f2933;
+    color: var(--foreground);
     white-space: pre-wrap;
     word-break: break-all;
   }
-  /* 高亮 className 由 stage 组件指定;在此声明 stage 2 / 3 用到的颜色。
-     色板:红=cleaning(格式整理)/ 橙=auto 水印 / 黄=suspect 水印 / 蓝=章 / 绿=卷 */
+  /* 高亮颜色:红=cleaning / 橙=auto 水印 / 黄=suspect 水印 / 蓝=章 / 绿=卷
+     在 dark 模式下加深底色让高亮更显眼。 */
   :global(.hl-cleaning) {
     background: rgba(220, 53, 69, 0.22);
     border-bottom: 1px solid rgba(220, 53, 69, 0.7);
     border-radius: 2px;
   }
+  :global(.dark .hl-cleaning) { background: rgba(220, 53, 69, 0.32); }
+
   :global(.hl-watermark-auto) {
     background: rgba(255, 140, 0, 0.22);
     border-bottom: 1px solid rgba(255, 140, 0, 0.85);
     border-radius: 2px;
   }
+  :global(.dark .hl-watermark-auto) { background: rgba(255, 140, 0, 0.32); }
+
   :global(.hl-watermark-suspect) {
     background: rgba(245, 196, 0, 0.28);
     border-bottom: 1px dashed rgba(180, 142, 0, 0.85);
     border-radius: 2px;
   }
+  :global(.dark .hl-watermark-suspect) { background: rgba(245, 196, 0, 0.4); }
+
   :global(.hl-heading) {
     background: rgba(31, 111, 235, 0.18);
     border-bottom: 1px solid rgba(31, 111, 235, 0.7);
     border-radius: 2px;
     font-weight: 600;
   }
+  :global(.dark .hl-heading) { background: rgba(96, 165, 250, 0.28); }
+
   :global(.hl-volume) {
     background: rgba(46, 125, 50, 0.22);
     border-bottom: 1px solid rgba(46, 125, 50, 0.8);
     border-radius: 2px;
     font-weight: 700;
   }
+  :global(.dark .hl-volume) { background: rgba(76, 175, 80, 0.3); }
 </style>

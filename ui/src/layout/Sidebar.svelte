@@ -7,7 +7,7 @@
   import Settings from "../stages/Settings.svelte";
 </script>
 
-<aside class="sidebar">
+<aside class="flex w-80 shrink-0 flex-col overflow-y-auto border-r bg-sidebar text-sidebar-foreground">
   {#if stage.view === "settings"}
     <Settings />
   {:else if stage.id === 1}
@@ -20,15 +20,3 @@
     <Stage4Export />
   {/if}
 </aside>
-
-<style>
-  .sidebar {
-    width: 320px;
-    background: #f5f7fa;
-    border-right: 1px solid #cbd2d9;
-    overflow-y: auto;
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-  }
-</style>

@@ -4,6 +4,7 @@
   import { onMount } from "svelte";
   import { pipeline } from "../stores/pipeline.svelte.js";
   import { annotations, jumpToByteOffset } from "../stores/annotations.svelte.js";
+  import { mode } from "mode-watcher";
 
   const WIDTH = 14;
   const MIN_BLOCK_PX = 2;
@@ -13,6 +14,19 @@
   let height = $state(600);
 
   const totalBytes = $derived(pipeline.byteIndex?.totalBytes ?? 0);
+
+  // 把 layer.color 里的 CSS 变量(var(--xxx))解析成真实色值,canvas ctx 不接受 var()。
+  function resolveColor(c) {
+    if (!c) return "transparent";
+    if (typeof c === "string" && c.startsWith("var(")) {
+      const m = c.match(/var\((--[^)]+)\)/);
+      if (m) {
+        const v = getComputedStyle(document.documentElement).getPropertyValue(m[1]).trim();
+        return v || "transparent";
+      }
+    }
+    return c;
+  }
 
   function draw() {
     if (!canvas || totalBytes === 0) return;
@@ -24,11 +38,12 @@
     const ctx = canvas.getContext("2d");
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, WIDTH, height);
-    ctx.fillStyle = "#f5f7fa";
+    const bg = getComputedStyle(document.documentElement).getPropertyValue("--muted").trim() || "#f5f7fa";
+    ctx.fillStyle = bg;
     ctx.fillRect(0, 0, WIDTH, height);
 
     for (const layer of annotations.layers) {
-      ctx.fillStyle = layer.color;
+      ctx.fillStyle = resolveColor(layer.color);
       for (const it of layer.items) {
         const y = Math.floor((it.span.start / totalBytes) * height);
         const len = Math.max(
@@ -41,10 +56,11 @@
   }
 
   $effect(() => {
-    // 依赖:layers / height / totalBytes
+    // 依赖:layers / height / totalBytes / mode(模式切换时重绘以取新色)
     void annotations.layers;
     void height;
     void totalBytes;
+    void mode.current;
     draw();
   });
 
@@ -70,20 +86,6 @@
   });
 </script>
 
-<div class="ruler" bind:this={container}>
-  <canvas bind:this={canvas} onclick={onClick} aria-label="概览标尺"></canvas>
+<div bind:this={container} class="w-3.5 shrink-0 cursor-crosshair overflow-hidden border-l bg-muted">
+  <canvas bind:this={canvas} onclick={onClick} aria-label="概览标尺" class="block"></canvas>
 </div>
-
-<style>
-  .ruler {
-    width: 14px;
-    background: #f5f7fa;
-    border-left: 1px solid #cbd2d9;
-    flex-shrink: 0;
-    overflow: hidden;
-    cursor: crosshair;
-  }
-  canvas {
-    display: block;
-  }
-</style>
